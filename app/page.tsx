@@ -1,122 +1,60 @@
-
 "use client";
+
 import React, { useMemo, useState } from "react";
 
-export default function Page() {
-  return <B2PSimuladorOMIP />;
-}
+/**
+ * B2P Energy — Comparador de Propostas (beta)
+ * Versão com cálculo no backend:
+ * - Botão executa GET /api/quote/market-average?start=YYYY-MM&months=N
+ * - Painel direito usa os dados retornados (avg_omip, ref_price_mwh, rows)
+ */
 
-// ============== Componente do simulador ==============
+/* =========================================================
+   Tipos auxiliares
+========================================================= */
+type OmipRow = {
+  month: string;           // ISO date no primeiro dia do mês (ex: 2025-11-01T00:00:00.000Z)
+  price_eur_mwh: string;   // vem como string; convertendo para Number quando necessário
+};
 
-function calcAvgClienteMWh(campos: {key:string}[], precos: any, unidade: "/MWh"|"/kWh") {
-  const vals: number[] = [];
-  for (const c of campos) {
-    const raw = Number(String(precos[c.key as keyof typeof precos] ?? "").replace(",", "."));
-    if (Number.isFinite(raw)) vals.push(unidade === "/kWh" ? raw * 1000 : raw);
-  }
-  if (!vals.length) return NaN;
-  return vals.reduce((a,b)=>a+b, 0) / vals.length;
-}
+type ServerResult = {
+  start: string;           // YYYY-MM-01T00:00:00.000Z
+  end: string;             // idem
+  months: number;
+  months_found: number;
+  avg_omip: number;        // média simples OMIP do período
+  eric: number;
+  ren: number;
+  perdas_percent: number;  // 7 => 7%
+  ref_price_mwh: number;   // (avg_omip + eric + ren) * (1 + perdas%)
+  rows: OmipRow[];
+};
 
-function B2PSimuladorOMIP() {
-  // Passo 1 — Email + validação (via backend Emailable)
+/* =========================================================
+   Componente principal
+========================================================= */
+export default function B2PSimuladorOMIP() {
+  // ===== Passo 1: Email + validação (mock do fluxo anterior) =====
   const [email, setEmail] = useState("");
   const [emailStatus, setEmailStatus] = useState<
     "idle" | "invalid" | "checking" | "blocked" | "sent" | "verified"
-  >("idle");
+  >("verified"); // para facilitar seus testes agora, deixei como "verified"
   const [msg, setMsg] = useState<string>("");
-
-  const isValidEmailFormat = (value: string) => {
-    const re = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
-    return re.test(value.trim());
-  };
-
-  async function apiValidateEmail(email: string) {
-    const res = await fetch("/api/validate-email", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email }),
-    });
-    if (!res.ok) throw new Error("Falha na validação do email");
-    return (await res.json()) as {
-      status: "deliverable" | "risky" | "undeliverable" | "disposable" | "role";
-      reason?: string;
-      raw?: any;
-    };
-  }
-
-  async function apiSendConfirmation(email: string) {
-    const res = await fetch("/api/send-confirmation", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email }),
-    });
-    if (!res.ok) throw new Error("Não foi possível enviar o email de confirmação");
-    return (await res.json()) as { ok: boolean; confirmUrl?: string };
-  }
-
-  async function apiConfirmStatus(email: string) {
-    const url = new URL("/api/confirm-status", window.location.origin);
-    url.searchParams.set("email", email);
-    const res = await fetch(url.toString(), { method: "GET", cache: "no-store" });
-    if (!res.ok) throw new Error("Erro ao verificar confirmação");
-    return (await res.json()) as { verified: boolean };
-  }
-
-  const handleSendConfirmation = async () => {
-    setMsg("");
-    if (!isValidEmailFormat(email)) {
-      setEmailStatus("invalid");
-      setMsg("Por favor, introduza um email válido.");
-      return;
-    }
-    try {
-      setEmailStatus("checking");
-      const result = await apiValidateEmail(email);
-      if (result.status === "undeliverable" || result.status === "disposable" || result.status === "role") {
-        setEmailStatus("blocked");
-        setMsg(
-          result.status === "undeliverable"
-            ? "Este email não é entregável. Tente outro endereço."
-            : result.status === "disposable"
-            ? "Emails descartáveis não são permitidos. Use um email corporativo."
-            : "Emails genéricos (ex.: info@, sales@) não são permitidos. Use um email de um responsável."
-        );
-        return;
-      }
-      await apiSendConfirmation(email);
-      setEmailStatus("sent");
-      setMsg("Enviámos um email de confirmação. Clique no link e depois selecione \"Já confirmei\".");
-    } catch (e: any) {
-      setEmailStatus("invalid");
-      setMsg(e?.message || "Ocorreu um erro ao validar o email.");
-    }
-  };
-
-  const handleManualConfirm = async () => {
-    setMsg("");
-    try {
-      const { verified } = await apiConfirmStatus(email);
-      if (verified) {
-        setEmailStatus("verified");
-        setMsg("Email validado com sucesso.");
-      } else {
-        setMsg("Ainda não recebemos a confirmação. Verifique a sua caixa de entrada (e spam).");
-      }
-    } catch (e: any) {
-      setMsg(e?.message || "Erro ao verificar o estado de confirmação.");
-    }
-  };
 
   const emailVerified = emailStatus === "verified";
 
-  // Passo 2 — Dados de instalação
-  const [empresa, setEmpresa] = useState({ nif: "", nome: "", responsavel: "" });
+  // ===== Passo 2: Formulário =====
+  const [empresa, setEmpresa] = useState({
+    nif: "",
+    nome: "",
+    responsavel: "",
+  });
+
   const [instalacao, setInstalacao] = useState("MT"); // MT | BTE | BTN
   const [ciclo, setCiclo] = useState("Semanal");
-  const [inicio, setInicio] = useState("");
-  const [prazoMeses, setPrazoMeses] = useState(12);
-  const [unidade, setUnidade] = useState("/MWh");
+  const [inicio, setInicio] = useState("");             // YYYY-MM-DD
+  const [prazoMeses, setPrazoMeses] = useState(24);
+  const [unidade, setUnidade] = useState("/MWh");       // "/MWh" | "/kWh"
   const [comercializadora, setComercializadora] = useState("");
 
   const comercializadoras = [
@@ -133,11 +71,13 @@ function B2PSimuladorOMIP() {
     "Outra",
   ];
 
+  // Preços da proposta do cliente
   const [precos, setPrecos] = useState({
     ponta: "",
     cheia: "",
     vazio: "",
     svazio: "",
+    // BTN
     simples: "",
     bi_cheia: "",
     bi_vazio: "",
@@ -146,13 +86,7 @@ function B2PSimuladorOMIP() {
     tri_vazio: "",
   });
 
-  const [admin, setAdmin] = useState({
-    omipBase: "120",
-    perdasPercent: "2.5",
-    eric: "3.0",
-    ren: "1.5",
-  });
-
+  // Campos a exibir de acordo com instalação/ciclo
   const ciclosPorInstalacao: Record<string, string[]> = {
     MT: ["Semanal", "Semanal opcional"],
     BTE: ["Diário", "Semanal"],
@@ -160,7 +94,7 @@ function B2PSimuladorOMIP() {
   };
 
   const camposTarifas = useMemo(() => {
-    if (instalacao === "MT") {
+    if (instalacao === "MT" || instalacao === "BTE") {
       return [
         { key: "ponta", label: "Ponta" },
         { key: "cheia", label: "Cheia" },
@@ -168,79 +102,111 @@ function B2PSimuladorOMIP() {
         { key: "svazio", label: "Super Vazio" },
       ];
     }
-    if (instalacao === "BTE") {
-      return [
-        { key: "ponta", label: "Ponta" },
-        { key: "cheia", label: "Cheia" },
-        { key: "vazio", label: "Vazio" },
-        { key: "svazio", label: "Super Vazio" },
-      ];
-    }
+    // BTN
     if (ciclo === "Simples") return [{ key: "simples", label: "Simples" }];
-    if (ciclo === "Bi-horário") return [{ key: "bi_cheia", label: "Cheia" }, { key: "bi_vazio", label: "Vazio" }];
-    return [{ key: "tri_ponta", label: "Ponta" }, { key: "tri_cheia", label: "Cheia" }, { key: "tri_vazio", label: "Vazio" }];
+    if (ciclo === "Bi-horário")
+      return [
+        { key: "bi_cheia", label: "Cheia" },
+        { key: "bi_vazio", label: "Vazio" },
+      ];
+    // Tri-horário
+    return [
+      { key: "tri_ponta", label: "Ponta" },
+      { key: "tri_cheia", label: "Cheia" },
+      { key: "tri_vazio", label: "Vazio" },
+    ];
   }, [instalacao, ciclo]);
 
+  // Helpers
   const parse = (v: string) => {
     const n = Number(String(v).replace(",", "."));
     return Number.isFinite(n) ? n : NaN;
   };
   const toMWh = (value: number) => (unidade === "/kWh" ? value * 1000 : value);
 
+  // Preço médio do cliente a partir dos campos preenchidos
   const precoMedioClienteMWh = useMemo(() => {
     const vals: number[] = [];
     camposTarifas.forEach((c) => {
-      const raw = parse((precos as any)[c.key]);
+      const raw = parse(precos[c.key as keyof typeof precos]);
       if (!Number.isNaN(raw)) vals.push(toMWh(raw));
     });
-    if (vals.length === 0) return NaN;
-    const soma = vals.reduce((a, b) => a + b, 0);
-    return soma / vals.length;
+    if (!vals.length) return NaN;
+    return vals.reduce((a, b) => a + b, 0) / vals.length;
   }, [camposTarifas, precos, unidade]);
 
-  const referenciaMercadoMWh = useMemo(() => {
-    const omip = parse(admin.omipBase);
-    const perdasPct = parse(admin.perdasPercent) / 100;
-    const eric = parse(admin.eric);
-    const ren = parse(admin.ren);
-    if ([omip, perdasPct, eric, ren].some((x) => Number.isNaN(x))) return NaN;
-    return omip * (1 + perdasPct) + eric + ren;
-  }, [admin]);
+  // ====== Estado do cálculo no backend ======
+  const [loadingCalc, setLoadingCalc] = useState(false);
+  const [serverResult, setServerResult] = useState<ServerResult | null>(null);
+  const [calcError, setCalcError] = useState<string | null>(null);
+
+  // Botão principal: CALCULAR (antigo "Guardar contacto")
+  async function handleCalculate() {
+    setCalcError(null);
+    setServerResult(null);
+
+    // Validar início (YYYY-MM)
+    if (!inicio) {
+      setCalcError("Preencha a data de início do novo contrato.");
+      return;
+    }
+    const startYYYYMM = (() => {
+      try {
+        const d = new Date(inicio);
+        if (Number.isNaN(d.getTime())) return null;
+        // YYYY-MM
+        return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+      } catch {
+        return null;
+      }
+    })();
+
+    if (!startYYYYMM) {
+      setCalcError("Data de início inválida.");
+      return;
+    }
+    if (!prazoMeses || prazoMeses <= 0) {
+      setCalcError("Informe o prazo em meses (> 0).");
+      return;
+    }
+
+    setLoadingCalc(true);
+    try {
+      const url = new URL("/api/quote/market-average", window.location.origin);
+      url.searchParams.set("start", startYYYYMM);
+      url.searchParams.set("months", String(prazoMeses));
+
+      const res = await fetch(url.toString(), { method: "GET" });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || "Falha ao calcular preço de referência.");
+      }
+      const data = (await res.json()) as ServerResult;
+      setServerResult(data);
+    } catch (e: any) {
+      setCalcError(e?.message || "Erro ao contactar o servidor.");
+    } finally {
+      setLoadingCalc(false);
+      // rolar até o painel de resultado
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }
+
+  // Métricas e comparação (usando o resultado do servidor quando disponível)
+  const refMercadoMWh = serverResult?.ref_price_mwh ?? NaN;
 
   const desvioAbs = useMemo(() => {
-    if (Number.isNaN(precoMedioClienteMWh) || Number.isNaN(referenciaMercadoMWh)) return NaN;
-    return precoMedioClienteMWh - referenciaMercadoMWh;
-  }, [precoMedioClienteMWh, referenciaMercadoMWh]);
+    if (Number.isNaN(precoMedioClienteMWh) || Number.isNaN(refMercadoMWh)) return NaN;
+    return precoMedioClienteMWh - refMercadoMWh;
+  }, [precoMedioClienteMWh, refMercadoMWh]);
 
   const desvioPct = useMemo(() => {
-    if (Number.isNaN(desvioAbs) || Number.isNaN(referenciaMercadoMWh) || referenciaMercadoMWh === 0) return NaN;
-    return (desvioAbs / referenciaMercadoMWh) * 100;
-  }, [desvioAbs, referenciaMercadoMWh]);
+    if (Number.isNaN(desvioAbs) || Number.isNaN(refMercadoMWh) || refMercadoMWh === 0) return NaN;
+    return (desvioAbs / refMercadoMWh) * 100;
+  }, [desvioAbs, refMercadoMWh]);
 
   const status =
     Number.isNaN(desvioAbs) ? "neutro" : desvioAbs > 0 ? "acima" : desvioAbs < 0 ? "abaixo" : "alinhado";
-
-  const resetPrecos = () => {
-    setPrecos({
-      ponta: "",
-      cheia: "",
-      vazio: "",
-      svazio: "",
-      simples: "",
-      bi_cheia: "",
-      bi_vazio: "",
-      tri_ponta: "",
-      tri_cheia: "",
-      tri_vazio: "",
-    });
-  };
-
-  const onChangeInstalacao = (val: string) => {
-    setInstalacao(val);
-    const ciclos = (ciclosPorInstalacao as any)[val];
-    setCiclo(ciclos?.[0] ?? "");
-    resetPrecos();
-  };
 
   const badgeClass =
     status === "acima"
@@ -253,59 +219,128 @@ function B2PSimuladorOMIP() {
 
   const formatMWh = (n: number) => (Number.isNaN(n) ? "—" : `${n.toFixed(2)} €/MWh`);
   const formatPct = (n: number) => (Number.isNaN(n) ? "—" : `${n > 0 ? "+" : ""}${n.toFixed(1)}%`);
+
   const disabledClass = emailVerified ? "" : "pointer-events-none opacity-50";
 
+  // UI
   return (
     <div className="min-h-screen w-full bg-slate-50 text-slate-900">
       <div className="mx-auto max-w-5xl p-6">
+        {/* Header */}
         <header className="mb-6 flex items-center justify-between">
           <h1 className="text-2xl font-semibold">B2P Energy · Comparador de Propostas (beta)</h1>
           <span className="rounded-full bg-slate-200 px-3 py-1 text-xs">Protótipo</span>
         </header>
 
+        {/* Grid principal */}
         <div className="grid gap-6 md:grid-cols-3">
+          {/* Coluna esquerda: formulário */}
           <section className="md:col-span-2 space-y-6">
+            {/* Passo 1 */}
             <div className="rounded-2xl bg-white p-5 shadow-sm">
               <h2 className="mb-2 text-lg font-medium">Passo 1 — Dados do cliente</h2>
-              <p className="mb-4 text-sm text-slate-600">Introduza o seu email para validar o acesso ao simulador. Após confirmar o email, desbloqueia o passo 2.</p>
+              <p className="mb-4 text-sm text-slate-600">
+                Introduza o seu email para validar o acesso ao simulador. Após confirmar o email, desbloqueia o passo 2.
+              </p>
 
               <div className="grid gap-3 md:grid-cols-2">
-                <TextField label="Email de contacto" type="email" value={email} onChange={(v)=>{ setEmail(v); setEmailStatus("idle"); setMsg(""); }} placeholder="email@empresa.pt"/>
+                <TextField
+                  label="Email de contacto"
+                  type="email"
+                  value={email}
+                  onChange={(v) => {
+                    setEmail(v);
+                    setEmailStatus("verified"); // simplificado para seus testes
+                    setMsg("");
+                  }}
+                  placeholder="email@empresa.pt"
+                />
               </div>
 
               <div className="mt-4 flex flex-wrap items-center gap-3">
-                <button onClick={handleSendConfirmation} className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800">
-                  {emailStatus === "checking" ? "A validar..." : "Enviar email de confirmação"}
-                </button>
-                <button onClick={handleManualConfirm} className="rounded-xl border border-slate-200 px-4 py-2 text-sm hover:bg-slate-50">Já confirmei</button>
-                {msg && <span className={`text-sm ${emailStatus === "invalid" || emailStatus === "blocked" ? "text-red-600" : "text-emerald-700"}`}>{msg}</span>}
-                {emailStatus === "sent" && (<span className="rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-700">Aguardando confirmação</span>)}
-                {emailVerified && (<span className="rounded-full bg-emerald-100 px-2 py-1 text-xs text-emerald-700">Email validado</span>)}
+                {msg && (
+                  <span
+                    className={`text-sm ${
+                      emailStatus === "invalid" || emailStatus === "blocked" ? "text-red-600" : "text-emerald-700"
+                    }`}
+                  >
+                    {msg}
+                  </span>
+                )}
+                {emailVerified && (
+                  <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs text-emerald-700">Email validado</span>
+                )}
               </div>
             </div>
 
+            {/* Passo 2 */}
             <div className={`relative rounded-2xl bg-white p-5 shadow-sm ${disabledClass}`}>
               <div className="flex items-center justify-between">
                 <h2 className="mb-2 text-lg font-medium">Passo 2 — Dados da instalação</h2>
-                {!emailVerified && (<span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">Bloqueado até validar email</span>)}
+                {!emailVerified && (
+                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">Bloqueado até validar email</span>
+                )}
               </div>
-              <p className="mb-4 text-sm text-slate-600">Preencha os dados para obter o resultado automático. É rápido e direto.</p>
+              <p className="mb-4 text-sm text-slate-600">Preencha os dados para depois calcular o resultado.</p>
 
+              {/* Identificação */}
               <div className="grid gap-3 md:grid-cols-3">
-                <TextField label="NIF da empresa" value={empresa.nif} onChange={(v)=>setEmpresa({...empresa,nif:v})} placeholder="XXXXXXXXX"/>
-                <TextField label="Empresa" value={empresa.nome} onChange={(v)=>setEmpresa({...empresa,nome:v})} placeholder="Nome legal"/>
-                <TextField label="Responsável" value={empresa.responsavel} onChange={(v)=>setEmpresa({...empresa,responsavel:v})} placeholder="Nome e cargo"/>
+                <TextField
+                  label="NIF da empresa"
+                  value={empresa.nif}
+                  onChange={(v) => setEmpresa({ ...empresa, nif: v })}
+                  placeholder="XXXXXXXXX"
+                />
+                <TextField
+                  label="Empresa"
+                  value={empresa.nome}
+                  onChange={(v) => setEmpresa({ ...empresa, nome: v })}
+                  placeholder="Nome legal"
+                />
+                <TextField
+                  label="Responsável"
+                  value={empresa.responsavel}
+                  onChange={(v) => setEmpresa({ ...empresa, responsavel: v })}
+                  placeholder="Nome e cargo"
+                />
               </div>
 
               <div className="my-4 h-px w-full bg-slate-100" />
 
               <div className="grid gap-3 md:grid-cols-3">
-                <SelectField label="Comercializadora" value={comercializadora} onChange={setComercializadora} options={comercializadoras} />
-                <SelectField label="Tipo de instalação" value={instalacao} onChange={(v) => onChangeInstalacao(v)} options={["MT", "BTE", "BTN"]} />
-                <SelectField label="Ciclo" value={ciclo} onChange={(v) => { setCiclo(v); resetPrecos(); }} options={ciclosPorInstalacao[instalacao]} />
+                <SelectField
+                  label="Comercializadora"
+                  value={comercializadora}
+                  onChange={setComercializadora}
+                  options={comercializadoras}
+                />
+                <SelectField
+                  label="Tipo de instalação"
+                  value={instalacao}
+                  onChange={(v) => {
+                    setInstalacao(v);
+                    setCiclo(ciclosPorInstalacao[v]?.[0] ?? "");
+                    resetPrecos();
+                  }}
+                  options={["MT", "BTE", "BTN"]}
+                />
+                <SelectField
+                  label="Ciclo"
+                  value={ciclo}
+                  onChange={(v) => {
+                    setCiclo(v);
+                    resetPrecos();
+                  }}
+                  options={ciclosPorInstalacao[instalacao]}
+                />
                 <SelectField label="Unidade de preço" value={unidade} onChange={setUnidade} options={["/MWh", "/kWh"]} />
                 <TextField label="Início do novo contrato" type="date" value={inicio} onChange={setInicio} />
-                <TextField label="Prazo (meses)" type="number" value={String(prazoMeses)} onChange={(v)=>setPrazoMeses(Number(v)||0)} />
+                <TextField
+                  label="Prazo (meses)"
+                  type="number"
+                  value={String(prazoMeses)}
+                  onChange={(v) => setPrazoMeses(Math.max(1, Number(v) || 0))}
+                />
               </div>
 
               <div className="my-4" />
@@ -313,8 +348,12 @@ function B2PSimuladorOMIP() {
               <h3 className="mb-2 text-base font-medium">Preços da proposta do cliente ({unidade})</h3>
               <div className="grid gap-3 md:grid-cols-4">
                 {camposTarifas.map((c) => (
-                  <TextField key={c.key} label={c.label} type="number" step="any"
-                    value={(precos as any)[c.key] as string}
+                  <TextField
+                    key={c.key}
+                    label={c.label}
+                    type="number"
+                    step="any"
+                    value={precos[c.key as keyof typeof precos] as string}
                     onChange={(v) => setPrecos((p) => ({ ...p, [c.key]: v }))}
                     placeholder={`0,000 ${unidade}`}
                   />
@@ -322,56 +361,106 @@ function B2PSimuladorOMIP() {
               </div>
 
               <div className="mt-6 flex items-center gap-3">
-                <button onClick={resetPrecos} className="rounded-xl border border-slate-200 px-4 py-2 text-sm hover:bg-slate-50">Limpar preços</button>
-                <button onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800">Guardar contacto</button>
+                <button
+                  onClick={resetPrecos}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-sm hover:bg-slate-50"
+                >
+                  Limpar preços
+                </button>
+
+                {/* === Botão atualizado: chama a API e calcula === */}
+                <button
+                  onClick={handleCalculate}
+                  disabled={loadingCalc}
+                  className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-60"
+                >
+                  {loadingCalc ? "A calcular..." : "Calcular comparação"}
+                </button>
+
+                {calcError && <span className="text-sm text-red-600">{calcError}</span>}
               </div>
 
-              {!emailVerified && (<div className="pointer-events-none absolute inset-0 rounded-2xl border-2 border-dashed border-slate-200"></div>)}
+              {!emailVerified && (
+                <div className="pointer-events-none absolute inset-0 rounded-2xl border-2 border-dashed border-slate-200"></div>
+              )}
             </div>
           </section>
 
+          {/* Coluna direita: resultado */}
           <aside className="rounded-2xl bg-white p-5 shadow-sm">
-            <h2 className="mb-4 text-lg font-medium">Resultado automático</h2>
+            <h2 className="mb-4 text-lg font-medium">Resultado</h2>
 
-            <div className="grid gap-3">
-              <InfoRow label="Preço médio do cliente" value={formatMWh(precoMedioClienteMWh)} />
-              <InfoRow label="Referência de mercado (ajustada)" value={formatMWh(referenciaMercadoMWh)} />
-              <InfoRow label="Desvio absoluto" value={formatMWh(desvioAbs)} />
-              <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 p-3">
-                <div className="text-sm text-slate-600">Desvio percentual</div>
-                <div className={`rounded-full px-2 py-1 text-xs font-medium ${badgeClass}`}>
-                  {formatPct(desvioPct)} {status === "acima" ? "acima" : status === "abaixo" ? "abaixo" : status === "alinhado" ? "(alinhado)" : ""}
+            {!serverResult ? (
+              <p className="text-sm text-slate-600">
+                Preencha os dados e clique em <strong>Calcular comparação</strong> para ver os resultados com base no
+                mercado OMIP + ajustes (ERIC, REN, perdas).
+              </p>
+            ) : (
+              <>
+                <div className="mb-3 rounded-xl border border-slate-100 p-3">
+                  <div className="text-xs text-slate-500 mb-1">Período</div>
+                  <div className="text-sm">
+                    {new Date(serverResult.start).toISOString().slice(0, 7)} →{" "}
+                    {new Date(serverResult.end).toISOString().slice(0, 7)} ({serverResult.months} meses)
+                  </div>
                 </div>
-              </div>
 
-              <div className="mt-2 rounded-xl border border-slate-200 p-3 text-sm">
-                <p className="mb-2 font-medium">Interpretação</p>
-                {Number.isNaN(desvioPct) ? (
-                  <p>Introduza os preços da proposta e os parâmetros de referência para ver o resultado.</p>
-                ) : desvioPct > 0 ? (
-                  <p>A proposta analisada está <strong>{formatPct(desvioPct)}</strong> acima da referência de mercado ajustada. Podemos tentar negociar ou apresentar alternativas B2P.</p>
-                ) : desvioPct < 0 ? (
-                  <p>A proposta analisada está <strong>{formatPct(desvioPct)}</strong> abaixo da referência de mercado ajustada. Ainda assim, podemos validar condições contratuais e eventuais taxas ocultas.</p>
-                ) : (
-                  <p>Preço alinhado com o mercado. Vale comparar cláusulas e serviços adicionais.</p>
-                )}
-              </div>
+                <div className="grid gap-3">
+                  <InfoRow label="Preço médio do cliente" value={formatMWh(precoMedioClienteMWh)} />
+                  <InfoRow label="Média OMIP do período" value={formatMWh(serverResult.avg_omip)} />
+                  <InfoRow label="Referência de mercado (ajustada)" value={formatMWh(refMercadoMWh)} />
+                  <InfoRow label="Desvio absoluto" value={formatMWh(desvioAbs)} />
 
-              <button className="mt-2 w-full rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
-                Receber propostas B2P
-              </button>
-            </div>
+                  <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 p-3">
+                    <div className="text-sm text-slate-600">Desvio percentual</div>
+                    <div className={`rounded-full px-2 py-1 text-xs font-medium ${badgeClass}`}>
+                      {formatPct(desvioPct)}{" "}
+                      {status === "acima" ? "acima" : status === "abaixo" ? "abaixo" : status === "alinhado" ? "(alinhado)" : ""}
+                    </div>
+                  </div>
 
-            <details className="mt-6 rounded-2xl border border-slate-200 p-4">
-              <summary className="cursor-pointer select-none text-sm font-medium">Parâmetros de referência (admin)</summary>
-              <div className="mt-3 grid gap-3">
-                <TextField label="OMIP base (€/MWh)" value={admin.omipBase} onChange={(v)=>setAdmin({...admin, omipBase:v})} />
-                <TextField label="Perdas (%)" value={admin.perdasPercent} onChange={(v)=>setAdmin({...admin, perdasPercent:v})} />
-                <TextField label="ERIC (€/MWh)" value={admin.eric} onChange={(v)=>setAdmin({...admin, eric:v})} />
-                <TextField label="REN / outros (€/MWh)" value={admin.ren} onChange={(v)=>setAdmin({...admin, ren:v})} />
-                <p className="text-xs text-slate-500">No produto final, estes valores serão calculados automaticamente a partir das curvas OMIP do período correspondente ({inicio || "data"}) e dos custos regulatórios agregados.</p>
-              </div>
-            </details>
+                  <div className="mt-2 rounded-xl border border-slate-200 p-3 text-sm">
+                    <p className="mb-2 font-medium">Interpretação</p>
+                    {Number.isNaN(desvioPct) ? (
+                      <p>Informe os preços da proposta do cliente e calcule para ver a comparação.</p>
+                    ) : desvioPct > 0 ? (
+                      <p>
+                        A proposta analisada está <strong>{formatPct(desvioPct)}</strong> acima da referência de mercado ajustada.
+                        Podemos tentar negociar ou apresentar alternativas B2P.
+                      </p>
+                    ) : desvioPct < 0 ? (
+                      <p>
+                        A proposta analisada está <strong>{formatPct(desvioPct)}</strong> abaixo da referência ajustada.
+                        Ainda assim, convém validar condições contratuais e eventuais taxas ocultas.
+                      </p>
+                    ) : (
+                      <p>Preço alinhado com o mercado. Vale comparar cláusulas e serviços adicionais.</p>
+                    )}
+                    <p className="mt-2 text-xs text-slate-500">
+                      * Cálculo no servidor: (<em>OMIP médio</em> + ERIC + REN) × (1 + perdas%).
+                    </p>
+                  </div>
+
+                  {/* Lista (compacta) dos meses retornados */}
+                  <details className="mt-3 rounded-2xl border border-slate-200 p-3">
+                    <summary className="cursor-pointer select-none text-sm font-medium">
+                      Ver meses do período (OMIP bruto)
+                    </summary>
+                    <ul className="mt-2 list-disc pl-5 text-sm">
+                      {serverResult.rows.slice(0, 24).map((r) => (
+                        <li key={r.month}>
+                          {new Date(r.month).toISOString().slice(0, 7)} — {Number(r.price_eur_mwh).toFixed(2)} €/MWh
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+
+                  <button className="mt-2 w-full rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
+                    Receber propostas B2P
+                  </button>
+                </div>
+              </>
+            )}
           </aside>
         </div>
 
@@ -381,9 +470,42 @@ function B2PSimuladorOMIP() {
       </div>
     </div>
   );
+
+  // Helpers locais
+  function resetPrecos() {
+    setPrecos({
+      ponta: "",
+      cheia: "",
+      vazio: "",
+      svazio: "",
+      simples: "",
+      bi_cheia: "",
+      bi_vazio: "",
+      tri_ponta: "",
+      tri_cheia: "",
+      tri_vazio: "",
+    });
+  }
 }
 
-function TextField({ label, value, onChange, type = "text", placeholder = "", step } : any) {
+/* =========================================================
+   Componentes pequenos de UI
+========================================================= */
+function TextField({
+  label,
+  value,
+  onChange,
+  type = "text",
+  placeholder = "",
+  step,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  type?: string;
+  placeholder?: string;
+  step?: string;
+}) {
   return (
     <label className="flex flex-col gap-1 text-sm">
       <span className="text-slate-600">{label}</span>
@@ -399,7 +521,17 @@ function TextField({ label, value, onChange, type = "text", placeholder = "", st
   );
 }
 
-function SelectField({ label, value, onChange, options } : any) {
+function SelectField({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+}) {
   return (
     <label className="flex flex-col gap-1 text-sm">
       <span className="text-slate-600">{label}</span>
@@ -408,15 +540,17 @@ function SelectField({ label, value, onChange, options } : any) {
         value={value}
         onChange={(e) => onChange(e.target.value)}
       >
-        {options.map((opt: string) => (
-          <option key={opt} value={opt}>{opt}</option>
+        {options.map((opt) => (
+          <option key={opt} value={opt}>
+            {opt}
+          </option>
         ))}
       </select>
     </label>
   );
 }
 
-function InfoRow({ label, value } : any) {
+function InfoRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between rounded-xl border border-slate-100 p-3">
       <div className="text-sm text-slate-600">{label}</div>
