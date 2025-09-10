@@ -4,8 +4,6 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/app/lib/db";
 
-export const dynamic = "force-dynamic"; // evita cache
-
 function parseMonthToISO(m: string): string | null {
   const s = m.trim();
   let m1 = s.match(/^(\d{4})[-\/](\d{1,2})$/);              // YYYY-MM / YYYY/MM
