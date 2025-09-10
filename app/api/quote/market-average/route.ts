@@ -1,48 +1,77 @@
+// app/api/quote/market-average/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { sql } from "../../../lib/db";
+import { sql } from "@/app/lib/db";
+
+// Mes "YYYY-MM" -> Date ISO (primeiro dia mês)
+function parseYYYYMM(yyyyMM: string): string | null {
+  const m = yyyyMM.trim();
+  const parts = m.split("-");
+  if (parts.length !== 2) return null;
+  const [y, mon] = parts;
+  const year = Number(y), month = Number(mon);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) return null;
+  return new Date(Date.UTC(year, month - 1, 1)).toISOString();
+}
 
 export async function GET(req: NextRequest) {
-  const startStr = req.nextUrl.searchParams.get("start");
-  const monthsStr = req.nextUrl.searchParams.get("months") || "12";
-  if (!startStr) return NextResponse.json({ error: "start ausente" }, { status: 400 });
+  try {
+    const startParam = req.nextUrl.searchParams.get("start") || ""; // ex. "2025-11"
+    const monthsParam = req.nextUrl.searchParams.get("months") || "0";
+    const startIso = parseYYYYMM(startParam);
+    const months = Number(monthsParam);
 
-  const start = new Date(startStr);
-  const months = Math.max(1, Math.min(120, parseInt(monthsStr, 10) || 12));
-  const startMonth = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
-  const endMonth = new Date(Date.UTC(startMonth.getUTCFullYear(), startMonth.getUTCMonth() + months, 1));
+    if (!startIso || !Number.isFinite(months) || months <= 0) {
+      return NextResponse.json({ error: "invalid params" }, { status: 400 });
+    }
 
-  // Busca OMIP no intervalo
-  const { rows: omip } = await sql`
-    SELECT month, price_eur_mwh
+    // Buscar OMIP do período
+    const rowsRes = await sql`
+      SELECT month, price_eur_mwh
       FROM omip_monthly
-     WHERE month >= ${startMonth.toISOString().slice(0,10)}
-       AND month <  ${endMonth.toISOString().slice(0,10)}
-     ORDER BY month
-  `;
-  if (!omip.length) return NextResponse.json({ error: "Sem OMIP para o período" }, { status: 404 });
+      WHERE month >= ${startIso}
+      ORDER BY month ASC
+      LIMIT ${months}
+    `;
 
-  // Lê os parâmetros globais
-  const { rows: s } = await sql`SELECT losses_pct, eric_eur_mwh, ren_eur_mwh FROM admin_settings WHERE id = TRUE`;
-  const { losses_pct, eric_eur_mwh, ren_eur_mwh } = s[0];
+    const rows = rowsRes.rows as { month: string; price_eur_mwh: any }[];
+    const months_found = rows.length;
 
-  // Média OMIP do período
-  const omipAvg =
-    omip.reduce((sum, r) => sum + Number(r.price_eur_mwh), 0) / omip.length;
+    // Carregar settings admin (perdas, eric, ren)
+    const settingsRes = await sql`
+      SELECT column_name, data_type
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'admin_settings'
+    `;
 
-  // Fórmula: (OMIP_média + ERIC + REN) * (1 + perdas/100)
-  const marketRef =
-    (omipAvg + Number(eric_eur_mwh) + Number(ren_eur_mwh)) * (1 + Number(losses_pct) / 100);
+    // Se a tua tabela admin_settings já está nas colunas (losses_pct, eric_eur_mwh, ren_eur_mwh)
+    const adminRes = await sql`SELECT losses_pct, eric_eur_mwh, ren_eur_mwh FROM admin_settings LIMIT 1`;
+    const admin = adminRes.rows[0] || { losses_pct: 7, eric_eur_mwh: 3, ren_eur_mwh: 1.5 };
+    const perdas_percent = Number(admin.losses_pct) || 7;
+    const eric = Number(admin.eric_eur_mwh) || 3;
+    const ren  = Number(admin.ren_eur_mwh)  || 1.5;
 
-  return NextResponse.json({
-    start: startMonth.toISOString().slice(0,10),
-    months,
-    omip_count: omip.length,
-    omip_avg_eur_mwh: Number(omipAvg.toFixed(6)),
-    params: {
-      losses_pct: Number(losses_pct),
-      eric_eur_mwh: Number(eric_eur_mwh),
-      ren_eur_mwh: Number(ren_eur_mwh),
-    },
-    market_ref_eur_mwh: Number(marketRef.toFixed(6))
-  });
+    // Média OMIP do período
+    const avg_omip = months_found
+      ? rows.reduce((s, r) => s + Number(r.price_eur_mwh), 0) / months_found
+      : null;
+
+    // Referência = (OMIP + ERIC + REN) * (1 + perdas%)
+    const ref_price_mwh =
+      avg_omip == null ? null : (avg_omip + eric + ren) * (1 + perdas_percent / 100);
+
+    return NextResponse.json({
+      start: `${startParam}-01`,
+      end: rows[rows.length - 1]?.month || null,
+      months,
+      months_found,
+      avg_omip,
+      eric,
+      ren,
+      perdas_percent,
+      ref_price_mwh,
+      rows,
+    });
+  } catch (e: any) {
+    return NextResponse.json({ error: e?.message || "server error" }, { status: 500 });
+  }
 }
