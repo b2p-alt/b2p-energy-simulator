@@ -8,6 +8,16 @@ export default function Page() {
 
 // ============== Componente do simulador ==============
 
+function calcAvgClienteMWh(campos: {key:string}[], precos: any, unidade: "/MWh"|"/kWh") {
+  const vals: number[] = [];
+  for (const c of campos) {
+    const raw = Number(String(precos[c.key as keyof typeof precos] ?? "").replace(",", "."));
+    if (Number.isFinite(raw)) vals.push(unidade === "/kWh" ? raw * 1000 : raw);
+  }
+  if (!vals.length) return NaN;
+  return vals.reduce((a,b)=>a+b, 0) / vals.length;
+}
+
 function B2PSimuladorOMIP() {
   // Passo 1 — Email + validação (via backend Emailable)
   const [email, setEmail] = useState("");
