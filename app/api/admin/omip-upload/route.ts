@@ -95,17 +95,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "no valid rows" }, { status: 400 });
     }
 
-    const values = parsed.map((r) => sql`(${r.month}, ${r.price}, ${r.source})`);
-    await sql`
-      INSERT INTO omip_monthly (month, price_eur_mwh, source)
-      VALUES ${sql.join(values, sql`, `)}
-      ON CONFLICT (month) DO UPDATE
-        SET price_eur_mwh = EXCLUDED.price_eur_mwh,
-            source = EXCLUDED.source,
-            updated_at = now()
-    `;
+let inserted = 0;
+for (const r of parsed) {
+  await sql`
+    INSERT INTO omip_monthly (month, price_eur_mwh, source)
+    VALUES (${r.month}, ${r.price}, ${r.source})
+    ON CONFLICT (month) DO UPDATE
+      SET price_eur_mwh = EXCLUDED.price_eur_mwh,
+          source = EXCLUDED.source,
+          updated_at = now()
+  `;
+  inserted++;
+}
 
-    return NextResponse.json({ ok: true, inserted: parsed.length });
+return NextResponse.json({ ok: true, inserted });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "upload error" }, { status: 500 });
   }
