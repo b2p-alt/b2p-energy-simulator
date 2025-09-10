@@ -62,9 +62,10 @@ export async function GET(req: NextRequest) {
 
     // 2) Lê ERIC, REN e perdas (%) do admin_settings
     const settingsRes = await sql`
-      SELECT key, value FROM admin_settings
-      WHERE key IN ('eric', 'ren', 'perdas_percent')
-    `;
+    SELECT "key", "value"
+    FROM admin_settings
+    WHERE "key" = ANY(${sql.array(['eric', 'ren', 'perdas_percent'], 'text')})
+  `;
     const settings = new Map<string, number>(
       settingsRes.rows.map((r: any) => [r.key, Number(r.value)])
     );
