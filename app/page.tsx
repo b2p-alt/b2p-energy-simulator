@@ -1,9 +1,8 @@
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 // Página principal — Simulador/Comparador
-// Mantém: validação/confirm. de email (Passo 1), formulário (Passo 2), painel de resultados à direita,
-// lista de simulações e gravação. Acrescentado: conversão automática /MWh <-> /kWh + toast 3s.
+// Agora o painel de resultados (à direita) só é mostrado após clicar "Ver a simulação".
 
 export default function B2PSimuladorOMIP() {
   // ===== Passo 1: Email + validação =====
@@ -17,13 +16,12 @@ export default function B2PSimuladorOMIP() {
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [marketingOptIn, setMarketingOptIn] = useState(false);
 
-  // Helpers de validação local (formato)
   const isValidEmailFormat = (value: string) => {
     const re = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
     return re.test(value.trim());
   };
 
-  // --- API client (placeholders) ---
+  // --- API (placeholders) ---
   async function apiValidateEmail(email: string) {
     const res = await fetch("/api/validate-email", {
       method: "POST",
@@ -78,10 +76,9 @@ export default function B2PSimuladorOMIP() {
         setMsg("É necessário concordar com os Termos e a Política para continuar.");
         return;
       }
-
       setEmailStatus("checking");
       const result = await apiValidateEmail(email);
-      if (result.status === "undeliverable" || result.status === "disposable" || result.status === "role") {
+      if (["undeliverable", "disposable", "role"].includes(result.status)) {
         setEmailStatus("blocked");
         setMsg(
           result.status === "undeliverable"
@@ -125,7 +122,7 @@ export default function B2PSimuladorOMIP() {
 
   const emailVerified = emailStatus === "verified";
 
-  // ===== Passo 2: Dados da instalação / contrato =====
+  // ===== Passo 2 =====
   const [empresa, setEmpresa] = useState({ nif: "", nome: "", responsavel: "" });
 
   const [instalacao, setInstalacao] = useState("MT"); // MT | BTE | BTN
@@ -135,7 +132,7 @@ export default function B2PSimuladorOMIP() {
   const [unidade, setUnidade] = useState("/MWh"); // "/MWh" | "/kWh"
   const [comercializadora, setComercializadora] = useState("");
 
-  // Novos campos do Passo 2
+  // Novos campos
   const [includeNetworks, setIncludeNetworks] = useState(false);
   const [annualConsumption, setAnnualConsumption] = useState<string>("");
 
@@ -146,7 +143,11 @@ export default function B2PSimuladorOMIP() {
     window.setTimeout(() => setToast({ show: false, text: "" }), 3000);
   };
 
-  // Principais comercializadoras
+  // Mostrar/ocultar painel da direita
+  const [hasSimulated, setHasSimulated] = useState(false);
+  const resultRef = useRef<HTMLDivElement>(null);
+
+  // Comercializadoras
   const comercializadoras = [
     "EDP Comercial",
     "Endesa Energia",
@@ -161,7 +162,7 @@ export default function B2PSimuladorOMIP() {
     "Outra",
   ];
 
-  // Inputs de preços por tarifa
+  // Preços
   const [precos, setPrecos] = useState({
     ponta: "",
     cheia: "",
@@ -188,14 +189,14 @@ export default function B2PSimuladorOMIP() {
     "tri_vazio",
   ] as const;
 
-  // Opções de ciclo por tipo de instalação
+  // Ciclos por instalação
   const ciclosPorInstalacao: Record<string, string[]> = {
     MT: ["Semanal", "Semanal opcional"],
     BTE: ["Diário", "Semanal"],
     BTN: ["Simples", "Bi-horário", "Tri-horário"],
   };
 
-  // Campos de preço a mostrar
+  // Campos de preço visíveis
   const camposTarifas = useMemo(() => {
     if (instalacao === "MT" || instalacao === "BTE") {
       return [
@@ -205,15 +206,12 @@ export default function B2PSimuladorOMIP() {
         { key: "svazio", label: "Super Vazio" },
       ];
     }
-    if (ciclo === "Simples") {
-      return [{ key: "simples", label: "Simples" }];
-    }
-    if (ciclo === "Bi-horário") {
+    if (ciclo === "Simples") return [{ key: "simples", label: "Simples" }];
+    if (ciclo === "Bi-horário")
       return [
         { key: "bi_cheia", label: "Cheia" },
         { key: "bi_vazio", label: "Vazio" },
       ];
-    }
     return [
       { key: "tri_ponta", label: "Ponta" },
       { key: "tri_cheia", label: "Cheia" },
@@ -228,41 +226,26 @@ export default function B2PSimuladorOMIP() {
   };
   const toMWh = (value: number) => (unidade === "/kWh" ? value * 1000 : value);
 
-  // Conversão automática quando a unidade muda (+ toast)
+  // Conversão automática unidade (+ toast)
   const onChangeUnidade = (novaUnidade: "/MWh" | "/kWh" | string) => {
     const old = unidade as "/MWh" | "/kWh";
     const next = novaUnidade as "/MWh" | "/kWh";
     if (old === next) return;
 
-    const factor =
-      old === "/MWh" && next === "/kWh"
-        ? 1 / 1000
-        : old === "/kWh" && next === "/MWh"
-        ? 1000
-        : 1;
-
+    const factor = old === "/MWh" && next === "/kWh" ? 1 / 1000 : old === "/kWh" && next === "/MWh" ? 1000 : 1;
     setPrecos((p) => {
       const upd: any = { ...p };
       for (const k of priceKeys) {
-        const raw = p[k];
-        const n = parse(raw);
+        const n = parse(p[k]);
         if (!Number.isNaN(n)) {
           const conv = n * factor;
-          upd[k] = Number(conv).toLocaleString("pt-PT", {
-            minimumFractionDigits: 3,
-            maximumFractionDigits: 3,
-          });
+          upd[k] = Number(conv).toLocaleString("pt-PT", { minimumFractionDigits: 3, maximumFractionDigits: 3 });
         }
       }
       return upd;
     });
-
     setUnidade(next);
-    showToast(
-      `Valores convertidos para ${next === "/kWh" ? "€/kWh" : "€/MWh"} (conversão ${
-        next === "/kWh" ? "÷ 1000" : "× 1000"
-      }).`
-    );
+    showToast(`Valores convertidos para ${next === "/kWh" ? "€/kWh" : "€/MWh"} (conversão ${next === "/kWh" ? "÷ 1000" : "× 1000"}).`);
   };
 
   // Cálculos
@@ -273,17 +256,10 @@ export default function B2PSimuladorOMIP() {
       if (!Number.isNaN(raw)) vals.push(toMWh(raw));
     });
     if (vals.length === 0) return NaN;
-    const soma = vals.reduce((a, b) => a + b, 0);
-    return soma / vals.length;
+    return vals.reduce((a, b) => a + b, 0) / vals.length;
   }, [camposTarifas, precos, unidade]);
 
-  const [admin, setAdmin] = useState({
-    omipBase: "120",
-    perdasPercent: "2.5",
-    eric: "3.0",
-    ren: "1.5",
-  });
-
+  const [admin, setAdmin] = useState({ omipBase: "195", perdasPercent: "0.0", eric: "0.0", ren: "0.0" });
   const referenciaMercadoMWh = useMemo(() => {
     const omip = parse(admin.omipBase);
     const perdasPct = parse(admin.perdasPercent) / 100;
@@ -303,13 +279,8 @@ export default function B2PSimuladorOMIP() {
     return (desvioAbs / referenciaMercadoMWh) * 100;
   }, [desvioAbs, referenciaMercadoMWh]);
 
-  const status = Number.isNaN(desvioAbs)
-    ? "neutro"
-    : desvioAbs > 0
-    ? "acima"
-    : desvioAbs < 0
-    ? "abaixo"
-    : "alinhado";
+  const status =
+    Number.isNaN(desvioAbs) ? "neutro" : desvioAbs > 0 ? "acima" : desvioAbs < 0 ? "abaixo" : "alinhado";
 
   const resetPrecos = () => {
     setPrecos({
@@ -347,7 +318,12 @@ export default function B2PSimuladorOMIP() {
 
   const disabledClass = emailVerified ? "" : "pointer-events-none opacity-50";
 
-  // ===== Lista de simulações do utilizador =====
+  // Habilitar botão "Ver a simulação" somente se houver algum preço visível preenchido
+  const canSimulate = useMemo(() => {
+    return camposTarifas.some((c) => !Number.isNaN(parse((precos as any)[c.key])));
+  }, [camposTarifas, precos]);
+
+  // ===== Minhas simulações =====
   const [mySims, setMySims] = useState<
     Array<{ id: string; created_at: string; nif: string | null; supplier: string | null }>
   >([]);
@@ -392,8 +368,9 @@ export default function B2PSimuladorOMIP() {
         tri_vazio: s.tri_vazio?.toString() || "",
       });
 
-      window.scrollTo({ top: 0, behavior: "smooth" });
-      setSaveMsg("Simulação carregada.");
+      // Ao carregar uma simulação, já mostramos o painel
+      setHasSimulated(true);
+      setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
     } catch {}
   }
 
@@ -590,7 +567,7 @@ export default function B2PSimuladorOMIP() {
                 ))}
               </div>
 
-              {/* NOVO BLOCO: logo abaixo dos preços */}
+              {/* Linha nova (abaixo dos preços) */}
               <div className="mt-4 grid gap-3 md:grid-cols-4">
                 <label className="col-span-2 flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm">
                   <input type="checkbox" checked={includeNetworks} onChange={(e) => setIncludeNetworks(e.target.checked)} />
@@ -613,10 +590,14 @@ export default function B2PSimuladorOMIP() {
                   Limpar preços
                 </button>
                 <button
-                  onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
-                  className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800"
+                  onClick={() => {
+                    setHasSimulated(true);
+                    setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+                  }}
+                  disabled={!canSimulate}
+                  className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-50"
                 >
-                  Subir ao topo
+                  Ver a simulação
                 </button>
               </div>
 
@@ -626,81 +607,83 @@ export default function B2PSimuladorOMIP() {
             </div>
           </section>
 
-          {/* Coluna direita: resultado + gravação + lista */}
-          <aside className="rounded-2xl bg-white p-5 shadow-sm">
-            <h2 className="mb-4 text-lg font-medium">Resultado automático</h2>
+          {/* Coluna direita: só aparece após clicar "Ver a simulação" */}
+          {hasSimulated && (
+            <aside ref={resultRef} className="rounded-2xl bg-white p-5 shadow-sm">
+              <h2 className="mb-4 text-lg font-medium">Resultado automático</h2>
 
-            <div className="grid gap-3">
-              <InfoRow label="Preço médio do cliente" value={formatMWh(precoMedioClienteMWh)} />
-              <InfoRow label="Referência de mercado (ajustada)" value={formatMWh(referenciaMercadoMWh)} />
-              <InfoRow label="Desvio absoluto" value={formatMWh(desvioAbs)} />
-              <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 p-3">
-                <div className="text-sm text-slate-600">Desvio percentual</div>
-                <div className={`rounded-full px-2 py-1 text-xs font-medium ${badgeClass}`}>
-                  {formatPct(desvioPct)} {status === "acima" ? "acima" : status === "abaixo" ? "abaixo" : status === "alinhado" ? "(alinhado)" : ""}
+              <div className="grid gap-3">
+                <InfoRow label="Preço médio do cliente" value={formatMWh(precoMedioClienteMWh)} />
+                <InfoRow label="Referência de mercado (ajustada)" value={formatMWh(referenciaMercadoMWh)} />
+                <InfoRow label="Desvio absoluto" value={formatMWh(desvioAbs)} />
+                <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 p-3">
+                  <div className="text-sm text-slate-600">Desvio percentual</div>
+                  <div className={`rounded-full px-2 py-1 text-xs font-medium ${badgeClass}`}>
+                    {formatPct(desvioPct)} {status === "acima" ? "acima" : status === "abaixo" ? "abaixo" : status === "alinhado" ? "(alinhado)" : ""}
+                  </div>
                 </div>
+
+                {/* Interpretação */}
+                <div className="mt-2 rounded-xl border border-slate-200 p-3 text-sm">
+                  <p className="mb-2 font-medium">Interpretação</p>
+                  {Number.isNaN(desvioPct) ? (
+                    <p>Introduza os preços da proposta e os parâmetros de referência para ver o resultado.</p>
+                  ) : desvioPct > 0 ? (
+                    <p>
+                      A proposta analisada está <strong>{formatPct(desvioPct)}</strong> acima da referência de mercado ajustada.
+                      Podemos tentar negociar ou comparar alternativas.
+                    </p>
+                  ) : desvioPct < 0 ? (
+                    <p>
+                      A proposta analisada está <strong>{formatPct(desvioPct)}</strong> abaixo da referência de mercado ajustada.
+                      Ainda assim, valide condições contratuais e eventuais taxas ocultas.
+                    </p>
+                  ) : (
+                    <p>Preço alinhado com o mercado. Vale comparar cláusulas e serviços adicionais.</p>
+                  )}
+                </div>
+
+                {/* Botão Gravar simulação */}
+                <button
+                  onClick={handleSaveSimulation}
+                  disabled={saving}
+                  className="mt-2 w-full rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  {saving ? "A gravar..." : "Gravar simulação"}
+                </button>
+                {saveMsg && <p className="mt-2 text-sm">{saveMsg}</p>}
               </div>
 
-              {/* Interpretação */}
-              <div className="mt-2 rounded-xl border border-slate-200 p-3 text-sm">
-                <p className="mb-2 font-medium">Interpretação</p>
-                {Number.isNaN(desvioPct) ? (
-                  <p>Introduza os preços da proposta e os parâmetros de referência para ver o resultado.</p>
-                ) : desvioPct > 0 ? (
-                  <p>
-                    A proposta analisada está <strong>{formatPct(desvioPct)}</strong> acima da referência de mercado ajustada.
-                    Podemos tentar negociar ou comparar alternativas.
-                  </p>
-                ) : desvioPct < 0 ? (
-                  <p>
-                    A proposta analisada está <strong>{formatPct(desvioPct)}</strong> abaixo da referência de mercado ajustada.
-                    Ainda assim, valide condições contratuais e eventuais taxas ocultas.
-                  </p>
+              {/* Lista de simulações do utilizador */}
+              <div className="mt-6 rounded-2xl border border-slate-200 p-4">
+                <div className="mb-2 flex items-center justify-between">
+                  <h3 className="text-sm font-medium">Minhas simulações</h3>
+                  <button onClick={refreshMySims} className="text-xs underline hover:no-underline">Atualizar</button>
+                </div>
+                {(!mySims || mySims.length === 0) ? (
+                  <p className="text-xs text-slate-500">Sem simulações gravadas.</p>
                 ) : (
-                  <p>Preço alinhado com o mercado. Vale comparar cláusulas e serviços adicionais.</p>
+                  <ul className="space-y-2">
+                    {mySims.map((item) => {
+                      const when = new Date(item.created_at).toISOString().slice(0, 10);
+                      return (
+                        <li key={item.id}>
+                          <button
+                            onClick={() => handleLoadSimulation(item.id)}
+                            className="w-full text-left rounded-lg border border-slate-100 px-3 py-2 text-xs hover:bg-slate-50"
+                            title="Carregar simulação"
+                          >
+                            <div className="font-medium">{item.nif || "—"} — {item.supplier || "—"}</div>
+                            <div className="text-slate-500">{when}</div>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
                 )}
               </div>
-
-              {/* Botão Gravar simulação */}
-              <button
-                onClick={handleSaveSimulation}
-                disabled={saving}
-                className="mt-2 w-full rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-              >
-                {saving ? "A gravar..." : "Gravar simulação"}
-              </button>
-              {saveMsg && <p className="mt-2 text-sm">{saveMsg}</p>}
-            </div>
-
-            {/* Lista de simulações do utilizador */}
-            <div className="mt-6 rounded-2xl border border-slate-200 p-4">
-              <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-sm font-medium">Minhas simulações</h3>
-                <button onClick={refreshMySims} className="text-xs underline hover:no-underline">Atualizar</button>
-              </div>
-              {(!mySims || mySims.length === 0) ? (
-                <p className="text-xs text-slate-500">Sem simulações gravadas.</p>
-              ) : (
-                <ul className="space-y-2">
-                  {mySims.map((item) => {
-                    const when = new Date(item.created_at).toISOString().slice(0, 10);
-                    return (
-                      <li key={item.id}>
-                        <button
-                          onClick={() => handleLoadSimulation(item.id)}
-                          className="w-full text-left rounded-lg border border-slate-100 px-3 py-2 text-xs hover:bg-slate-50"
-                          title="Carregar simulação"
-                        >
-                          <div className="font-medium">{item.nif || "—"} — {item.supplier || "—"}</div>
-                          <div className="text-slate-500">{when}</div>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </div>
-          </aside>
+            </aside>
+          )}
         </div>
 
         {/* Rodapé */}
