@@ -1,8 +1,13 @@
 "use client";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-// Página principal — Simulador/Comparador
-// Agora o painel de resultados (à direita) só é mostrado após clicar "Ver a simulação".
+/**
+ * Página principal — Simulador/Comparador
+ * - Cartão "Resultado automático" visível desde o início, conteúdo só após clicar "Ver a simulação"
+ * - "Minhas simulações" sempre visível; em branco até validar email; após validar, carrega a lista
+ * - Conversão automática /MWh <-> /kWh com toast
+ * - Referência de mercado carregada do backend (/api/reference/latest)
+ */
 
 export default function B2PSimuladorOMIP() {
   // ===== Passo 1: Email + validação =====
@@ -12,7 +17,6 @@ export default function B2PSimuladorOMIP() {
   >("idle");
   const [msg, setMsg] = useState<string>("");
 
-  // Consentimentos
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [marketingOptIn, setMarketingOptIn] = useState(false);
 
@@ -21,7 +25,6 @@ export default function B2PSimuladorOMIP() {
     return re.test(value.trim());
   };
 
-  // --- API (placeholders) ---
   async function apiValidateEmail(email: string) {
     const res = await fetch("/api/validate-email", {
       method: "POST",
@@ -34,7 +37,6 @@ export default function B2PSimuladorOMIP() {
       reason?: string;
     };
   }
-
   async function apiSendConfirmation(email: string) {
     const res = await fetch("/api/send-confirmation", {
       method: "POST",
@@ -44,7 +46,6 @@ export default function B2PSimuladorOMIP() {
     if (!res.ok) throw new Error("Não foi possível enviar o email de confirmação");
     return (await res.json()) as { ok: boolean };
   }
-
   async function apiConfirmStatus(email: string) {
     const url = new URL("/api/confirm-status", window.location.origin);
     url.searchParams.set("email", email);
@@ -52,7 +53,6 @@ export default function B2PSimuladorOMIP() {
     if (!res.ok) throw new Error("Erro ao verificar confirmação");
     return (await res.json()) as { verified: boolean };
   }
-
   async function persistConsentIfNeeded() {
     if (!email) return;
     try {
@@ -122,9 +122,8 @@ export default function B2PSimuladorOMIP() {
 
   const emailVerified = emailStatus === "verified";
 
-  // ===== Passo 2 =====
+  // ===== Passo 2: Dados =====
   const [empresa, setEmpresa] = useState({ nif: "", nome: "", responsavel: "" });
-
   const [instalacao, setInstalacao] = useState("MT"); // MT | BTE | BTN
   const [ciclo, setCiclo] = useState("Semanal");
   const [inicio, setInicio] = useState(""); // YYYY-MM-DD
@@ -136,14 +135,14 @@ export default function B2PSimuladorOMIP() {
   const [includeNetworks, setIncludeNetworks] = useState(false);
   const [annualConsumption, setAnnualConsumption] = useState<string>("");
 
-  // Toast de conversão
+  // Toast conversão
   const [toast, setToast] = useState<{ show: boolean; text: string }>({ show: false, text: "" });
   const showToast = (text: string) => {
     setToast({ show: true, text });
     window.setTimeout(() => setToast({ show: false, text: "" }), 3000);
   };
 
-  // Mostrar/ocultar painel da direita
+  // Mostrar/ocultar conteúdo do resultado
   const [hasSimulated, setHasSimulated] = useState(false);
   const resultRef = useRef<HTMLDivElement>(null);
 
@@ -162,7 +161,7 @@ export default function B2PSimuladorOMIP() {
     "Outra",
   ];
 
-  // Preços
+  // Preços cliente
   const [precos, setPrecos] = useState({
     ponta: "",
     cheia: "",
@@ -175,7 +174,6 @@ export default function B2PSimuladorOMIP() {
     tri_cheia: "",
     tri_vazio: "",
   });
-
   const priceKeys = [
     "ponta",
     "cheia",
@@ -213,10 +211,10 @@ export default function B2PSimuladorOMIP() {
         { key: "bi_vazio", label: "Vazio" },
       ];
     return [
-      { key: "tri_ponta", label: "Ponta" },
-      { key: "tri_cheia", label: "Cheia" },
-      { key: "tri_vazio", label: "Vazio" },
-    ];
+        { key: "tri_ponta", label: "Ponta" },
+        { key: "tri_cheia", label: "Cheia" },
+        { key: "tri_vazio", label: "Vazio" },
+      ];
   }, [instalacao, ciclo]);
 
   // Utils
@@ -239,6 +237,7 @@ export default function B2PSimuladorOMIP() {
         const n = parse(p[k]);
         if (!Number.isNaN(n)) {
           const conv = n * factor;
+          // mantemos 3 casas, com vírgula, para coerência visual
           upd[k] = Number(conv).toLocaleString("pt-PT", { minimumFractionDigits: 3, maximumFractionDigits: 3 });
         }
       }
@@ -247,6 +246,47 @@ export default function B2PSimuladorOMIP() {
     setUnidade(next);
     showToast(`Valores convertidos para ${next === "/kWh" ? "€/kWh" : "€/MWh"} (conversão ${next === "/kWh" ? "÷ 1000" : "× 1000"}).`);
   };
+
+  // ===== Referência de mercado (do backend) =====
+  const [refLoading, setRefLoading] = useState(false);
+  const [refUpdatedAt, setRefUpdatedAt] = useState<string | null>(null);
+  const [admin, setAdmin] = useState({
+    omipBase: "",        // €/MWh
+    perdasPercent: "",   // %
+    eric: "",            // €/MWh
+    ren: "",             // €/MWh
+  });
+
+  async function fetchReference() {
+    try {
+      setRefLoading(true);
+      const url = new URL("/api/reference/latest", window.location.origin);
+      url.searchParams.set("install_type", instalacao);
+      url.searchParams.set("cycle", ciclo);
+      url.searchParams.set("unit", "MWh"); // referência calculada sempre em €/MWh
+      const res = await fetch(url.toString());
+      if (!res.ok) throw new Error("Falha ao obter referência de mercado");
+      const data = await res.json();
+      // Esperado do backend:
+      // { omip_base_mwh: number, perdas_percent: number, eric_eur_mwh: number, ren_eur_mwh: number, updated_at?: string }
+      setAdmin({
+        omipBase: String(data.omip_base_mwh ?? ""),
+        perdasPercent: String(data.perdas_percent ?? ""),
+        eric: String(data.eric_eur_mwh ?? ""),
+        ren: String(data.ren_eur_mwh ?? ""),
+      });
+      setRefUpdatedAt(data.updated_at ?? null);
+    } catch {
+      // Em caso de erro, mantemos campos vazios. O cartão mostrará "—" até haver dados.
+    } finally {
+      setRefLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    fetchReference();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instalacao, ciclo]);
 
   // Cálculos
   const precoMedioClienteMWh = useMemo(() => {
@@ -259,7 +299,6 @@ export default function B2PSimuladorOMIP() {
     return vals.reduce((a, b) => a + b, 0) / vals.length;
   }, [camposTarifas, precos, unidade]);
 
-  const [admin, setAdmin] = useState({ omipBase: "195", perdasPercent: "0.0", eric: "0.0", ren: "0.0" });
   const referenciaMercadoMWh = useMemo(() => {
     const omip = parse(admin.omipBase);
     const perdasPct = parse(admin.perdasPercent) / 100;
@@ -318,7 +357,7 @@ export default function B2PSimuladorOMIP() {
 
   const disabledClass = emailVerified ? "" : "pointer-events-none opacity-50";
 
-  // Habilitar botão "Ver a simulação" somente se houver algum preço visível preenchido
+  // Botão "Ver a simulação" só se houver algum preço visível preenchido
   const canSimulate = useMemo(() => {
     return camposTarifas.some((c) => !Number.isNaN(parse((precos as any)[c.key])));
   }, [camposTarifas, precos]);
@@ -368,7 +407,6 @@ export default function B2PSimuladorOMIP() {
         tri_vazio: s.tri_vazio?.toString() || "",
       });
 
-      // Ao carregar uma simulação, já mostramos o painel
       setHasSimulated(true);
       setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
     } catch {}
@@ -512,9 +550,7 @@ export default function B2PSimuladorOMIP() {
                 {emailStatus === "sent" && (
                   <span className="rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-700">Aguardando confirmação</span>
                 )}
-                {emailVerified && (
-                  <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs text-emerald-700">Email validado</span>
-                )}
+                {emailVerified && <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs text-emerald-700">Email validado</span>}
               </div>
             </div>
 
@@ -539,7 +575,7 @@ export default function B2PSimuladorOMIP() {
 
               <div className="my-4 h-px w-full bg-slate-100" />
 
-              {/* Parâmetros principais */}
+              {/* Parâmetros */}
               <div className="grid gap-3 md:grid-cols-3">
                 <SelectField label="Comercializadora" value={comercializadora} onChange={setComercializadora} options={comercializadoras}/>
                 <SelectField label="Tipo de instalação" value={instalacao} onChange={(v) => onChangeInstalacao(v)} options={["MT", "BTE", "BTN"]}/>
@@ -558,8 +594,9 @@ export default function B2PSimuladorOMIP() {
                   <TextField
                     key={c.key}
                     label={c.label}
-                    type="number"
-                    step="any"
+                    type="text"
+                    inputMode="decimal"
+                    pattern="^[0-9.,]*$"
                     value={(precos as any)[c.key] as string}
                     onChange={(v) => setPrecos((p) => ({ ...p, [c.key]: v }))}
                     placeholder={`0,000 ${unidade}`}
@@ -601,89 +638,95 @@ export default function B2PSimuladorOMIP() {
                 </button>
               </div>
 
-              {!emailVerified && (
-                <div className="pointer-events-none absolute inset-0 rounded-2xl border-2 border-dashed border-slate-200"></div>
-              )}
+              {!emailVerified && <div className="pointer-events-none absolute inset-0 rounded-2xl border-2 border-dashed border-slate-200"></div>}
             </div>
           </section>
 
-          {/* Coluna direita: só aparece após clicar "Ver a simulação" */}
-          {hasSimulated && (
+          {/* Coluna direita: SEMPRE visível */}
+          <section className="space-y-6">
+            {/* Cartão Resultado automático */}
             <aside ref={resultRef} className="rounded-2xl bg-white p-5 shadow-sm">
               <h2 className="mb-4 text-lg font-medium">Resultado automático</h2>
 
-              <div className="grid gap-3">
-                <InfoRow label="Preço médio do cliente" value={formatMWh(precoMedioClienteMWh)} />
-                <InfoRow label="Referência de mercado (ajustada)" value={formatMWh(referenciaMercadoMWh)} />
-                <InfoRow label="Desvio absoluto" value={formatMWh(desvioAbs)} />
-                <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 p-3">
-                  <div className="text-sm text-slate-600">Desvio percentual</div>
-                  <div className={`rounded-full px-2 py-1 text-xs font-medium ${badgeClass}`}>
-                    {formatPct(desvioPct)} {status === "acima" ? "acima" : status === "abaixo" ? "abaixo" : status === "alinhado" ? "(alinhado)" : ""}
+              {!hasSimulated ? (
+                <div className="rounded-xl border border-slate-200 p-3 text-sm text-slate-600">
+                  Clique em <strong>“Ver a simulação”</strong> no Passo 2 para calcular e ver os resultados.
+                </div>
+              ) : (
+                <div className="grid gap-3">
+                  <InfoRow label="Preço médio do cliente" value={formatMWh(precoMedioClienteMWh)} />
+                  <InfoRow
+                    label={`Referência de mercado (ajustada)${refUpdatedAt ? ` · ${new Date(refUpdatedAt).toLocaleDateString("pt-PT")}` : ""}`}
+                    value={formatMWh(referenciaMercadoMWh)}
+                  />
+                  <InfoRow label="Desvio absoluto" value={formatMWh(desvioAbs)} />
+                  <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 p-3">
+                    <div className="text-sm text-slate-600">Desvio percentual</div>
+                    <div className={`rounded-full px-2 py-1 text-xs font-medium ${badgeClass}`}>
+                      {formatPct(desvioPct)} {status === "acima" ? "acima" : status === "abaixo" ? "abaixo" : status === "alinhado" ? "(alinhado)" : ""}
+                    </div>
                   </div>
+
+                  <div className="mt-2 rounded-xl border border-slate-200 p-3 text-sm">
+                    <p className="mb-2 font-medium">Interpretação</p>
+                    {Number.isNaN(desvioPct) ? (
+                      <p>Introduza os preços e garanta que a referência foi carregada para ver o resultado.</p>
+                    ) : desvioPct > 0 ? (
+                      <p>A proposta analisada está <strong>{formatPct(desvioPct)}</strong> acima da referência ajustada. Podemos negociar ou comparar alternativas.</p>
+                    ) : desvioPct < 0 ? (
+                      <p>A proposta analisada está <strong>{formatPct(desvioPct)}</strong> abaixo da referência ajustada. Ainda assim, valide condições contratuais e eventuais taxas.</p>
+                    ) : (
+                      <p>Preço alinhado com o mercado. Compare cláusulas e serviços adicionais.</p>
+                    )}
+                  </div>
+
+                  <button
+                    onClick={handleSaveSimulation}
+                    disabled={saving}
+                    className="mt-2 w-full rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    {saving ? "A gravar..." : "Gravar simulação"}
+                  </button>
+                  {saveMsg && <p className="mt-2 text-sm">{saveMsg}</p>}
                 </div>
+              )}
+            </aside>
 
-                {/* Interpretação */}
-                <div className="mt-2 rounded-xl border border-slate-200 p-3 text-sm">
-                  <p className="mb-2 font-medium">Interpretação</p>
-                  {Number.isNaN(desvioPct) ? (
-                    <p>Introduza os preços da proposta e os parâmetros de referência para ver o resultado.</p>
-                  ) : desvioPct > 0 ? (
-                    <p>
-                      A proposta analisada está <strong>{formatPct(desvioPct)}</strong> acima da referência de mercado ajustada.
-                      Podemos tentar negociar ou comparar alternativas.
-                    </p>
-                  ) : desvioPct < 0 ? (
-                    <p>
-                      A proposta analisada está <strong>{formatPct(desvioPct)}</strong> abaixo da referência de mercado ajustada.
-                      Ainda assim, valide condições contratuais e eventuais taxas ocultas.
-                    </p>
-                  ) : (
-                    <p>Preço alinhado com o mercado. Vale comparar cláusulas e serviços adicionais.</p>
-                  )}
-                </div>
-
-                {/* Botão Gravar simulação */}
-                <button
-                  onClick={handleSaveSimulation}
-                  disabled={saving}
-                  className="mt-2 w-full rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-                >
-                  {saving ? "A gravar..." : "Gravar simulação"}
-                </button>
-                {saveMsg && <p className="mt-2 text-sm">{saveMsg}</p>}
-              </div>
-
-              {/* Lista de simulações do utilizador */}
-              <div className="mt-6 rounded-2xl border border-slate-200 p-4">
-                <div className="mb-2 flex items-center justify-between">
-                  <h3 className="text-sm font-medium">Minhas simulações</h3>
+            {/* Cartão Minhas simulações — sempre visível */}
+            <aside className="rounded-2xl bg-white p-5 shadow-sm">
+              <div className="mb-2 flex items-center justify-between">
+                <h3 className="text-sm font-medium">Minhas simulações</h3>
+                {emailVerified && (
                   <button onClick={refreshMySims} className="text-xs underline hover:no-underline">Atualizar</button>
-                </div>
-                {(!mySims || mySims.length === 0) ? (
-                  <p className="text-xs text-slate-500">Sem simulações gravadas.</p>
-                ) : (
-                  <ul className="space-y-2">
-                    {mySims.map((item) => {
-                      const when = new Date(item.created_at).toISOString().slice(0, 10);
-                      return (
-                        <li key={item.id}>
-                          <button
-                            onClick={() => handleLoadSimulation(item.id)}
-                            className="w-full text-left rounded-lg border border-slate-100 px-3 py-2 text-xs hover:bg-slate-50"
-                            title="Carregar simulação"
-                          >
-                            <div className="font-medium">{item.nif || "—"} — {item.supplier || "—"}</div>
-                            <div className="text-slate-500">{when}</div>
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
                 )}
               </div>
+
+              {!emailVerified ? (
+                // em branco até validar o email
+                <div style={{ minHeight: 48 }} />
+              ) : !mySims || mySims.length === 0 ? (
+                <p className="text-xs text-slate-500">Sem simulações gravadas.</p>
+              ) : (
+                <ul className="space-y-2">
+                  {mySims.map((item) => {
+                    const when = new Date(item.created_at).toISOString().slice(0, 10);
+                    return (
+                      <li key={item.id}>
+                        <button
+                          onClick={() => handleLoadSimulation(item.id)}
+                          className="w-full text-left rounded-lg border border-slate-100 px-3 py-2 text-xs hover:bg-slate-50"
+                          title="Carregar simulação"
+                        >
+                          <div className="font-medium">{item.nif || "—"} — {item.supplier || "—"}</div>
+                          <div className="text-slate-500">{when}</div>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </aside>
-          )}
+          </section>
         </div>
 
         {/* Rodapé */}
@@ -711,6 +754,8 @@ function TextField({
   type = "text",
   placeholder = "",
   step,
+  inputMode,
+  pattern,
 }: {
   label: string;
   value: string;
@@ -718,6 +763,8 @@ function TextField({
   type?: string;
   placeholder?: string;
   step?: string;
+  inputMode?: React.HTMLAttributes<HTMLInputElement>["inputMode"];
+  pattern?: string;
 }) {
   return (
     <label className="flex flex-col gap-1 text-sm">
@@ -729,6 +776,8 @@ function TextField({
         type={type}
         placeholder={placeholder}
         step={step}
+        inputMode={inputMode}
+        pattern={pattern}
       />
     </label>
   );
