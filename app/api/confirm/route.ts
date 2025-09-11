@@ -19,3 +19,12 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: e?.message || "Token inválido" }, { status: 400 });
   }
 }
+
+// marca verificação persistente
+import { sql } from "@/app/lib/db"; // (no topo do arquivo)
+...
+await sql`
+  INSERT INTO users (email, verified_at)
+  VALUES (${email}, now())
+  ON CONFLICT (email) DO UPDATE SET verified_at = now()
+`;
