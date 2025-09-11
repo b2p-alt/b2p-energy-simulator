@@ -12,14 +12,16 @@ type Prices = {
 function toNumber(x:any){ const n = Number(x); return Number.isFinite(n) ? n : null; }
 
 function avgClientMWh(unit: "/MWh"|"/kWh", install_type: string, cycle: string, p: Prices) {
-  let vals:number[] = [];
+  const vals:number[] = [];
   const push = (v:any)=>{ const n=toNumber(v); if(n!=null) vals.push(unit==="/kWh"? n*1000 : n); };
   if (install_type === "MT" || install_type === "BTE") {
     push(p.ponta); push(p.cheia); push(p.vazio); push(p.svazio);
+  } else if (cycle === "Simples") {
+    push(p.simples);
+  } else if (cycle === "Bi-horário") {
+    push(p.bi_cheia); push(p.bi_vazio);
   } else {
-    if (cycle === "Simples") push(p.simples);
-    else if (cycle === "Bi-horário") { push(p.bi_cheia); push(p.bi_vazio); }
-    else { push(p.tri_ponta); push(p.tri_cheia); push(p.tri_vazio); }
+    push(p.tri_ponta); push(p.tri_cheia); push(p.tri_vazio);
   }
   if (!vals.length) return null;
   return vals.reduce((a,b)=>a+b,0)/vals.length;
@@ -32,12 +34,12 @@ export async function POST(req: NextRequest) {
     const email = String(body.email||"");
     if (!email) return NextResponse.json({ error:"email requerido" }, { status:400 });
 
-    // garante que o user existe
+    // garante user
     await sql`INSERT INTO users (email) VALUES (${email}) ON CONFLICT (email) DO NOTHING`;
 
     const install_type = String(body.install_type||"");
     const cycle = String(body.cycle||"");
-    const unit = body.unit === "/kWh" ? "/kWh" : "/MWh";
+    const unit: "/MWh"|"/kWh" = body.unit === "/kWh" ? "/kWh" : "/MWh";
     const start_date = String(body.start_date||"");
     const term_months = Number(body.term_months||0);
 
@@ -57,26 +59,27 @@ export async function POST(req: NextRequest) {
     // 1) média do cliente
     const avg_client_mwh = avgClientMWh(unit, install_type, cycle, prices);
 
-    // 2) redes médias do período (TODO: quando alimentarmos network_tariffs)
-    // por enquanto 0 para não travar
+    // 2) redes (placeholder 0 até integrarmos network_tariffs)
     const networks_avg_mwh = 0;
 
-    // Se cliente informou com redes, removemos redes p/ comparar a um ref "sem redes"
-    const avg_client_wo_networks = avg_client_mwh==null ? null : Math.max(0, avg_client_mwh - (client_prices_include_networks ? networks_avg_mwh : 0));
+    const avg_client_wo_networks =
+      avg_client_mwh==null ? null : Math.max(0, avg_client_mwh - (client_prices_include_networks ? networks_avg_mwh : 0));
 
-    // 3) referência de mercado (reuso do endpoint interno)
+    // 3) referência via endpoint interno
     const origin = process.env.APP_ORIGIN || req.nextUrl.origin;
-    const yyyyMM = new Date(start_date); const m = `${yyyyMM.getUTCFullYear()}-${String(yyyyMM.getUTCMonth()+1).padStart(2,"0")}`;
-    const url = new URL(`${origin}/api/quote/market-average`);
-    url.searchParams.set("start", m);
-    url.searchParams.set("months", String(term_months));
+    const d = new Date(start_date);
+    if (Number.isNaN(d.getTime())) return NextResponse.json({ error:"start_date inválida" }, { status:400 });
+    const startYYYYMM = `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}`;
 
+    const url = new URL(`${origin}/api/quote/market-average`);
+    url.searchParams.set("start", startYYYYMM);
+    url.searchParams.set("months", String(term_months));
     const refRes = await fetch(url.toString(), { cache:"no-store" });
     if (!refRes.ok) return NextResponse.json({ error:"falha ref mercado" }, { status:502 });
     const ref = await refRes.json();
 
-    const avg_omip_mwh = ref?.avg_omip ?? null;
-    const ref_price_mwh = ref?.ref_price_mwh ?? null;
+    const avg_omip_mwh = typeof ref?.avg_omip === "number" ? ref.avg_omip : null;
+    const ref_price_mwh = typeof ref?.ref_price_mwh === "number" ? ref.ref_price_mwh : null;
 
     let deviation_abs: number|null = null;
     let deviation_pct: number|null = null;
@@ -85,7 +88,6 @@ export async function POST(req: NextRequest) {
       deviation_pct = ref_price_mwh !== 0 ? (deviation_abs / ref_price_mwh) * 100 : null;
     }
 
-    // 4) grava simulação
     const ins = await sql<{id:string}>`
       INSERT INTO simulations (
         email, nif, company, responsavel, supplier,
