@@ -2,6 +2,9 @@
   "name": "b2p-energy-simulator",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=18.17.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -10,6 +13,7 @@
   },
   "dependencies": {
     "@vercel/postgres": "0.8.0",
+    "pg": "^8.11.5",
     "jose": "^5.2.0",
     "next": "14.2.5",
     "react": "18.3.1",
