@@ -1,57 +1,99 @@
+
 "use client";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /**
- * Página principal — Simulador/Comparador
- * - Cartão "Resultado automático" visível desde o início, conteúdo só após clicar "Ver a simulação"
- * - "Minhas simulações" sempre visível; em branco até validar email; após validar, carrega a lista
- * - Conversão automática /MWh <-> /kWh com toast
- * - Referência de mercado carregada do backend (/api/reference/latest)
+ * ============================================================
+ *  B2P · Comparador de Propostas — Página principal (app/page.tsx)
+ * ============================================================
+ *
+ *  Este ficheiro implementa:
+ *   - Passo 1: Validação/confirm. de email + consentimentos
+ *   - Passo 2: Formulário de parâmetros e preços do cliente
+ *   - Conversão automática /MWh <-> /kWh com toast
+ *   - Botão "Ver a simulação" que chama /api/simulations/simulate
+ *   - Painel de resultados: aparece sempre; conteúdo só após simular
+ *   - "Minhas simulações": sempre visível; vazio até validar email;
+ *      após validação, carrega a lista do utilizador e permite carregar 1 simulação
+ *   - Gravar simulação em /api/simulations/save
+ *
+ *  Endpoints usados (devem existir no projeto):
+ *   - POST /api/validate-email
+ *   - POST /api/send-confirmation
+ *   - GET  /api/confirm-status?email=...
+ *   - POST /api/user/consent
+ *   - GET  /api/simulations/list?email=...
+ *   - GET  /api/simulations/[id]
+ *   - POST /api/simulations/save
+ *   - POST /api/simulations/simulate   (novo, já enviado)
+ *
+ *  Observações:
+ *   - Todos os cálculos de referência (OMIP, ERIC, REN, Perdas) são feitos
+ *     no backend (simulate). O frontend só exibe os resultados.
+ *   - Todos os preços que o utilizador insere são strings (permitindo vírgula).
+ *     A conversão para número usa parse locale-friendly.
  */
 
+// -----------------------------
+// Tipos do resultado da simulação
+// -----------------------------
+type SimResult = {
+  ok: boolean;
+  months_used: string[];
+  months_missing: string[];
+  omip_avg_mwh: number;
+  eric_eur_mwh: number;
+  ren_eur_mwh: number;
+  losses_percent: number;
+  network_eur_mwh: number;
+  reference_mwh: number;
+  client_avg_mwh: number;
+  client_energy_avg_mwh: number;
+  deviation_abs_mwh: number;
+  deviation_pct: number;
+};
+
+// -----------------------------
+// Componente principal
+// -----------------------------
 export default function B2PSimuladorOMIP() {
-  // ===== Passo 1: Email + validação =====
+  // ===== PASSO 1: Email =====
   const [email, setEmail] = useState("");
   const [emailStatus, setEmailStatus] = useState<
     "idle" | "invalid" | "checking" | "blocked" | "sent" | "verified"
   >("idle");
-  const [msg, setMsg] = useState<string>("");
+  const [msg, setMsg] = useState("");
 
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [marketingOptIn, setMarketingOptIn] = useState(false);
 
-  const isValidEmailFormat = (value: string) => {
-    const re = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
-    return re.test(value.trim());
-  };
+  const isValidEmailFormat = (v: string) =>
+    /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(v.trim());
 
   async function apiValidateEmail(email: string) {
-    const res = await fetch("/api/validate-email", {
+    const r = await fetch("/api/validate-email", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email }),
     });
-    if (!res.ok) throw new Error("Falha na validação do email");
-    return (await res.json()) as {
-      status: "deliverable" | "risky" | "undeliverable" | "disposable" | "role";
-      reason?: string;
-    };
+    if (!r.ok) throw new Error("Falha na validação do email");
+    return r.json();
   }
   async function apiSendConfirmation(email: string) {
-    const res = await fetch("/api/send-confirmation", {
+    const r = await fetch("/api/send-confirmation", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email }),
     });
-    if (!res.ok) throw new Error("Não foi possível enviar o email de confirmação");
-    return (await res.json()) as { ok: boolean };
+    if (!r.ok) throw new Error("Não foi possível enviar o email de confirmação");
+    return r.json();
   }
   async function apiConfirmStatus(email: string) {
     const url = new URL("/api/confirm-status", window.location.origin);
     url.searchParams.set("email", email);
-    const res = await fetch(url.toString(), { method: "GET" });
-    if (!res.ok) throw new Error("Erro ao verificar confirmação");
-    return (await res.json()) as { verified: boolean };
+    const r = await fetch(url.toString());
+    if (!r.ok) throw new Error("Erro ao verificar confirmação");
+    return r.json();
   }
   async function persistConsentIfNeeded() {
     if (!email) return;
@@ -71,11 +113,11 @@ export default function B2PSimuladorOMIP() {
       setMsg("Por favor, introduza um email válido.");
       return;
     }
+    if (!termsAccepted) {
+      setMsg("É necessário concordar com os Termos e a Política para continuar.");
+      return;
+    }
     try {
-      if (!termsAccepted) {
-        setMsg("É necessário concordar com os Termos e a Política para continuar.");
-        return;
-      }
       setEmailStatus("checking");
       const result = await apiValidateEmail(email);
       if (["undeliverable", "disposable", "role"].includes(result.status)) {
@@ -95,7 +137,7 @@ export default function B2PSimuladorOMIP() {
       setMsg('Enviámos um email de confirmação. Clique no link e depois selecione "Já confirmei".');
     } catch (e: any) {
       setEmailStatus("invalid");
-      setMsg(e?.message || "Ocorreu um erro ao validar o email.");
+      setMsg(e?.message || "Erro ao validar o email.");
     }
   };
 
@@ -122,46 +164,30 @@ export default function B2PSimuladorOMIP() {
 
   const emailVerified = emailStatus === "verified";
 
-  // ===== Passo 2: Dados =====
+  // ===== PASSO 2: Formulário =====
   const [empresa, setEmpresa] = useState({ nif: "", nome: "", responsavel: "" });
-  const [instalacao, setInstalacao] = useState("MT"); // MT | BTE | BTN
+  const [instalacao, setInstalacao] = useState<"MT" | "BTE" | "BTN">("MT");
   const [ciclo, setCiclo] = useState("Semanal");
-  const [inicio, setInicio] = useState(""); // YYYY-MM-DD
+  const [inicio, setInicio] = useState(""); // yyyy-mm-dd
   const [prazoMeses, setPrazoMeses] = useState(12);
-  const [unidade, setUnidade] = useState("/MWh"); // "/MWh" | "/kWh"
+  const [unidade, setUnidade] = useState<"/MWh" | "/kWh">("/MWh");
   const [comercializadora, setComercializadora] = useState("");
 
-  // Novos campos
+  // Novos campos (já definidos anteriormente)
   const [includeNetworks, setIncludeNetworks] = useState(false);
   const [annualConsumption, setAnnualConsumption] = useState<string>("");
 
-  // Toast conversão
-  const [toast, setToast] = useState<{ show: boolean; text: string }>({ show: false, text: "" });
+  // Toast para conversão
+  const [toast, setToast] = useState<{ show: boolean; text: string }>({
+    show: false,
+    text: "",
+  });
   const showToast = (text: string) => {
     setToast({ show: true, text });
     window.setTimeout(() => setToast({ show: false, text: "" }), 3000);
   };
 
-  // Mostrar/ocultar conteúdo do resultado
-  const [hasSimulated, setHasSimulated] = useState(false);
-  const resultRef = useRef<HTMLDivElement>(null);
-
-  // Comercializadoras
-  const comercializadoras = [
-    "EDP Comercial",
-    "Endesa Energia",
-    "Iberdrola Clientes Portugal",
-    "Galp Power",
-    "Repsol",
-    "Goldenergy",
-    "Axpo Iberia",
-    "Audax",
-    "TotalEnergies",
-    "Naturgy",
-    "Outra",
-  ];
-
-  // Preços cliente
+  // Preços do cliente
   const [precos, setPrecos] = useState({
     ponta: "",
     cheia: "",
@@ -187,14 +213,12 @@ export default function B2PSimuladorOMIP() {
     "tri_vazio",
   ] as const;
 
-  // Ciclos por instalação
   const ciclosPorInstalacao: Record<string, string[]> = {
     MT: ["Semanal", "Semanal opcional"],
     BTE: ["Diário", "Semanal"],
     BTN: ["Simples", "Bi-horário", "Tri-horário"],
   };
 
-  // Campos de preço visíveis
   const camposTarifas = useMemo(() => {
     if (instalacao === "MT" || instalacao === "BTE") {
       return [
@@ -211,117 +235,53 @@ export default function B2PSimuladorOMIP() {
         { key: "bi_vazio", label: "Vazio" },
       ];
     return [
-        { key: "tri_ponta", label: "Ponta" },
-        { key: "tri_cheia", label: "Cheia" },
-        { key: "tri_vazio", label: "Vazio" },
-      ];
+      { key: "tri_ponta", label: "Ponta" },
+      { key: "tri_cheia", label: "Cheia" },
+      { key: "tri_vazio", label: "Vazio" },
+    ];
   }, [instalacao, ciclo]);
 
-  // Utils
+  // Helpers
   const parse = (v: string) => {
     const n = Number(String(v).replace(/\./g, "").replace(",", "."));
     return Number.isFinite(n) ? n : NaN;
   };
-  const toMWh = (value: number) => (unidade === "/kWh" ? value * 1000 : value);
 
-  // Conversão automática unidade (+ toast)
-  const onChangeUnidade = (novaUnidade: "/MWh" | "/kWh" | string) => {
-    const old = unidade as "/MWh" | "/kWh";
-    const next = novaUnidade as "/MWh" | "/kWh";
+  // Conversão automática da unidade (sem perder valores)
+  const onChangeUnidade = (nova: "/MWh" | "/kWh" | string) => {
+    const old = unidade;
+    const next = nova as "/MWh" | "/kWh";
     if (old === next) return;
 
-    const factor = old === "/MWh" && next === "/kWh" ? 1 / 1000 : old === "/kWh" && next === "/MWh" ? 1000 : 1;
+    const factor =
+      old === "/MWh" && next === "/kWh"
+        ? 1 / 1000
+        : old === "/kWh" && next === "/MWh"
+        ? 1000
+        : 1;
+
     setPrecos((p) => {
       const upd: any = { ...p };
       for (const k of priceKeys) {
         const n = parse(p[k]);
         if (!Number.isNaN(n)) {
-          const conv = n * factor;
-          // mantemos 3 casas, com vírgula, para coerência visual
-          upd[k] = Number(conv).toLocaleString("pt-PT", { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+          upd[k] = Number(n * factor).toLocaleString("pt-PT", {
+            minimumFractionDigits: 3,
+            maximumFractionDigits: 3,
+          });
         }
       }
       return upd;
     });
     setUnidade(next);
-    showToast(`Valores convertidos para ${next === "/kWh" ? "€/kWh" : "€/MWh"} (conversão ${next === "/kWh" ? "÷ 1000" : "× 1000"}).`);
+    showToast(
+      `Valores convertidos para ${
+        next === "/kWh" ? "€/kWh" : "€/MWh"
+      } (${next === "/kWh" ? "÷ 1000" : "× 1000"}).`
+    );
   };
 
-  // ===== Referência de mercado (do backend) =====
-  const [refLoading, setRefLoading] = useState(false);
-  const [refUpdatedAt, setRefUpdatedAt] = useState<string | null>(null);
-  const [admin, setAdmin] = useState({
-    omipBase: "",        // €/MWh
-    perdasPercent: "",   // %
-    eric: "",            // €/MWh
-    ren: "",             // €/MWh
-  });
-
-  async function fetchReference() {
-    try {
-      setRefLoading(true);
-      const url = new URL("/api/reference/latest", window.location.origin);
-      url.searchParams.set("install_type", instalacao);
-      url.searchParams.set("cycle", ciclo);
-      url.searchParams.set("unit", "MWh"); // referência calculada sempre em €/MWh
-      const res = await fetch(url.toString());
-      if (!res.ok) throw new Error("Falha ao obter referência de mercado");
-      const data = await res.json();
-      // Esperado do backend:
-      // { omip_base_mwh: number, perdas_percent: number, eric_eur_mwh: number, ren_eur_mwh: number, updated_at?: string }
-      setAdmin({
-        omipBase: String(data.omip_base_mwh ?? ""),
-        perdasPercent: String(data.perdas_percent ?? ""),
-        eric: String(data.eric_eur_mwh ?? ""),
-        ren: String(data.ren_eur_mwh ?? ""),
-      });
-      setRefUpdatedAt(data.updated_at ?? null);
-    } catch {
-      // Em caso de erro, mantemos campos vazios. O cartão mostrará "—" até haver dados.
-    } finally {
-      setRefLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    fetchReference();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instalacao, ciclo]);
-
-  // Cálculos
-  const precoMedioClienteMWh = useMemo(() => {
-    const vals: number[] = [];
-    camposTarifas.forEach((c) => {
-      const raw = parse((precos as any)[c.key]);
-      if (!Number.isNaN(raw)) vals.push(toMWh(raw));
-    });
-    if (vals.length === 0) return NaN;
-    return vals.reduce((a, b) => a + b, 0) / vals.length;
-  }, [camposTarifas, precos, unidade]);
-
-  const referenciaMercadoMWh = useMemo(() => {
-    const omip = parse(admin.omipBase);
-    const perdasPct = parse(admin.perdasPercent) / 100;
-    const eric = parse(admin.eric);
-    const ren = parse(admin.ren);
-    if ([omip, perdasPct, eric, ren].some((x) => Number.isNaN(x))) return NaN;
-    return omip * (1 + perdasPct) + eric + ren;
-  }, [admin]);
-
-  const desvioAbs = useMemo(() => {
-    if (Number.isNaN(precoMedioClienteMWh) || Number.isNaN(referenciaMercadoMWh)) return NaN;
-    return precoMedioClienteMWh - referenciaMercadoMWh;
-  }, [precoMedioClienteMWh, referenciaMercadoMWh]);
-
-  const desvioPct = useMemo(() => {
-    if (Number.isNaN(desvioAbs) || Number.isNaN(referenciaMercadoMWh) || referenciaMercadoMWh === 0) return NaN;
-    return (desvioAbs / referenciaMercadoMWh) * 100;
-  }, [desvioAbs, referenciaMercadoMWh]);
-
-  const status =
-    Number.isNaN(desvioAbs) ? "neutro" : desvioAbs > 0 ? "acima" : desvioAbs < 0 ? "abaixo" : "alinhado";
-
-  const resetPrecos = () => {
+  const resetPrecos = () =>
     setPrecos({
       ponta: "",
       cheia: "",
@@ -334,33 +294,61 @@ export default function B2PSimuladorOMIP() {
       tri_cheia: "",
       tri_vazio: "",
     });
-  };
 
-  const onChangeInstalacao = (val: string) => {
-    setInstalacao(val);
-    const ciclos = ciclosPorInstalacao[val];
+  const onChangeInstalacao = (v: "MT" | "BTE" | "BTN") => {
+    setInstalacao(v);
+    const ciclos = ciclosPorInstalacao[v];
     setCiclo(ciclos?.[0] ?? "");
     resetPrecos();
   };
 
-  const badgeClass =
-    status === "acima"
-      ? "bg-red-100 text-red-700"
-      : status === "abaixo"
-      ? "bg-green-100 text-green-700"
-      : status === "alinhado"
-      ? "bg-yellow-100 text-yellow-700"
-      : "bg-gray-100 text-gray-700";
+  // Pode simular?
+  const canSimulate = useMemo(
+    () => camposTarifas.some((c) => !Number.isNaN(parse((precos as any)[c.key]))),
+    [camposTarifas, precos]
+  );
 
-  const formatMWh = (n: number) => (Number.isNaN(n) ? "—" : `${n.toFixed(2)} €/MWh`);
-  const formatPct = (n: number) => (Number.isNaN(n) ? "—" : `${n > 0 ? "+" : ""}${n.toFixed(1)}%`);
+  // ===== SIMULAÇÃO (backend) =====
+  const [hasSimulated, setHasSimulated] = useState(false);
+  const [simLoading, setSimLoading] = useState(false);
+  const [sim, setSim] = useState<SimResult | null>(null);
+  const resultRef = useRef<HTMLDivElement>(null);
 
-  const disabledClass = emailVerified ? "" : "pointer-events-none opacity-50";
+  async function handleSimulate() {
+    setHasSimulated(true);
+    setSimLoading(true);
+    setSim(null);
 
-  // Botão "Ver a simulação" só se houver algum preço visível preenchido
-  const canSimulate = useMemo(() => {
-    return camposTarifas.some((c) => !Number.isNaN(parse((precos as any)[c.key])));
-  }, [camposTarifas, precos]);
+    // apenas campos visíveis
+    const payloadPrices: Record<string, string> = {};
+    for (const c of camposTarifas) payloadPrices[c.key] = (precos as any)[c.key] ?? "";
+
+    const payload = {
+      install_type: instalacao,
+      cycle: ciclo,
+      unit: unidade,
+      start_date: inicio || new Date().toISOString().slice(0, 10),
+      term_months: prazoMeses || 12,
+      include_networks: includeNetworks,
+      prices: payloadPrices,
+    };
+
+    try {
+      const r = await fetch("/api/simulations/simulate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = (await r.json()) as SimResult & { ok: boolean; error?: string };
+      if (!r.ok || !data.ok) throw new Error(data.error || "Falha ao calcular simulação");
+      setSim(data);
+    } catch (e: any) {
+      alert(e?.message || "Erro ao calcular simulação.");
+    } finally {
+      setSimLoading(false);
+      setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+    }
+  }
 
   // ===== Minhas simulações =====
   const [mySims, setMySims] = useState<
@@ -371,10 +359,7 @@ export default function B2PSimuladorOMIP() {
     if (!email) return;
     try {
       const res = await fetch(`/api/simulations/list?email=${encodeURIComponent(email)}`);
-      if (res.ok) {
-        const data = await res.json();
-        setMySims(data);
-      }
+      if (res.ok) setMySims(await res.json());
     } catch {}
   }
 
@@ -383,8 +368,12 @@ export default function B2PSimuladorOMIP() {
       const res = await fetch(`/api/simulations/${id}`);
       if (!res.ok) return;
       const s = await res.json();
-
-      setEmpresa({ nif: s.nif || "", nome: s.company || "", responsavel: s.responsavel || "" });
+      // Preenche o formulário com a simulação gravada
+      setEmpresa({
+        nif: s.nif || "",
+        nome: s.company || "",
+        responsavel: s.responsavel || "",
+      });
       setComercializadora(s.supplier || "");
       setInstalacao(s.install_type);
       setCiclo(s.cycle);
@@ -392,8 +381,9 @@ export default function B2PSimuladorOMIP() {
       setInicio(s.start_date?.slice(0, 10) || "");
       setPrazoMeses(s.term_months || 12);
       setIncludeNetworks(!!s.client_prices_include_networks);
-      setAnnualConsumption(s.annual_consumption_mwh != null ? String(s.annual_consumption_mwh) : "");
-
+      setAnnualConsumption(
+        s.annual_consumption_mwh != null ? String(s.annual_consumption_mwh) : ""
+      );
       setPrecos({
         ponta: s.ponta?.toString() || "",
         cheia: s.cheia?.toString() || "",
@@ -407,6 +397,7 @@ export default function B2PSimuladorOMIP() {
         tri_vazio: s.tri_vazio?.toString() || "",
       });
 
+      // Após carregar, já podemos mostrar o painel com base nesses dados
       setHasSimulated(true);
       setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
     } catch {}
@@ -447,21 +438,7 @@ export default function B2PSimuladorOMIP() {
       if (!res.ok) throw new Error(data?.error || "Falha ao gravar simulação.");
 
       setSaveMsg("Simulação gravada com sucesso.");
-
-      // Limpa formulário (mantém email)
-      setEmpresa({ nif: "", nome: "", responsavel: "" });
-      setComercializadora("");
-      setInstalacao("MT");
-      setCiclo("Semanal");
-      setUnidade("/MWh");
-      setInicio("");
-      setPrazoMeses(12);
-      setIncludeNetworks(false);
-      setAnnualConsumption("");
-      resetPrecos();
-
       await refreshMySims();
-      window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
     } catch (e: any) {
       setSaveMsg(e?.message || "Erro ao gravar simulação.");
     } finally {
@@ -469,6 +446,20 @@ export default function B2PSimuladorOMIP() {
     }
   }
 
+  // ===== UI helpers derivadas =====
+  const disabledClass = emailVerified ? "" : "pointer-events-none opacity-50";
+  const fmtMWh = (n: number) => (Number.isFinite(n) ? `${n.toFixed(2)} €/MWh` : "—");
+  const fmtPct = (n: number) => (Number.isFinite(n) ? `${n > 0 ? "+" : ""}${n.toFixed(1)}%` : "—");
+  const badgeClass =
+    sim && Number.isFinite(sim.deviation_abs_mwh)
+      ? sim.deviation_abs_mwh > 0
+        ? "bg-red-100 text-red-700"
+        : sim.deviation_abs_mwh < 0
+        ? "bg-green-100 text-green-700"
+        : "bg-yellow-100 text-yellow-700"
+      : "bg-gray-100 text-gray-700";
+
+  // ===== Render =====
   return (
     <div className="min-h-screen w-full bg-slate-50 text-slate-900">
       <div className="mx-auto max-w-5xl p-6">
@@ -506,7 +497,11 @@ export default function B2PSimuladorOMIP() {
               {/* Consentimentos */}
               <div className="mt-3 space-y-2 text-sm">
                 <label className="flex items-start gap-2">
-                  <input type="checkbox" checked={termsAccepted} onChange={(e) => setTermsAccepted(e.target.checked)} />
+                  <input
+                    type="checkbox"
+                    checked={termsAccepted}
+                    onChange={(e) => setTermsAccepted(e.target.checked)}
+                  />
                   <span>
                     Li e concordo com os{" "}
                     <a className="underline" href="#" onClick={(e) => e.preventDefault()}>
@@ -520,7 +515,11 @@ export default function B2PSimuladorOMIP() {
                   </span>
                 </label>
                 <label className="flex items-start gap-2">
-                  <input type="checkbox" checked={marketingOptIn} onChange={(e) => setMarketingOptIn(e.target.checked)} />
+                  <input
+                    type="checkbox"
+                    checked={marketingOptIn}
+                    onChange={(e) => setMarketingOptIn(e.target.checked)}
+                  />
                   <span>Concordo em receber comunicações comerciais por email.</span>
                 </label>
               </div>
@@ -541,16 +540,24 @@ export default function B2PSimuladorOMIP() {
                 {msg && (
                   <span
                     className={`text-sm ${
-                      emailStatus === "invalid" || emailStatus === "blocked" ? "text-red-600" : "text-emerald-700"
+                      emailStatus === "invalid" || emailStatus === "blocked"
+                        ? "text-red-600"
+                        : "text-emerald-700"
                     }`}
                   >
                     {msg}
                   </span>
                 )}
                 {emailStatus === "sent" && (
-                  <span className="rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-700">Aguardando confirmação</span>
+                  <span className="rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-700">
+                    Aguardando confirmação
+                  </span>
                 )}
-                {emailVerified && <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs text-emerald-700">Email validado</span>}
+                {emailVerified && (
+                  <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs text-emerald-700">
+                    Email validado
+                  </span>
+                )}
               </div>
             </div>
 
@@ -559,7 +566,9 @@ export default function B2PSimuladorOMIP() {
               <div className="flex items-center justify-between">
                 <h2 className="mb-2 text-lg font-medium">Passo 2 — Dados da instalação</h2>
                 {!emailVerified && (
-                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">Bloqueado até validar email</span>
+                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">
+                    Bloqueado até validar email
+                  </span>
                 )}
               </div>
               <p className="mb-4 text-sm text-slate-600">
@@ -568,27 +577,89 @@ export default function B2PSimuladorOMIP() {
 
               {/* Identificação */}
               <div className="grid gap-3 md:grid-cols-3">
-                <TextField label="NIF da empresa" value={empresa.nif} onChange={(v) => setEmpresa({ ...empresa, nif: v })} placeholder="XXXXXXXXX"/>
-                <TextField label="Empresa" value={empresa.nome} onChange={(v) => setEmpresa({ ...empresa, nome: v })} placeholder="Nome legal"/>
-                <TextField label="Responsável" value={empresa.responsavel} onChange={(v) => setEmpresa({ ...empresa, responsavel: v })} placeholder="Nome e cargo"/>
+                <TextField
+                  label="NIF da empresa"
+                  value={empresa.nif}
+                  onChange={(v) => setEmpresa({ ...empresa, nif: v })}
+                  placeholder="XXXXXXXXX"
+                />
+                <TextField
+                  label="Empresa"
+                  value={empresa.nome}
+                  onChange={(v) => setEmpresa({ ...empresa, nome: v })}
+                  placeholder="Nome legal"
+                />
+                <TextField
+                  label="Responsável"
+                  value={empresa.responsavel}
+                  onChange={(v) => setEmpresa({ ...empresa, responsavel: v })}
+                  placeholder="Nome e cargo"
+                />
               </div>
 
               <div className="my-4 h-px w-full bg-slate-100" />
 
-              {/* Parâmetros */}
+              {/* Parâmetros principais */}
               <div className="grid gap-3 md:grid-cols-3">
-                <SelectField label="Comercializadora" value={comercializadora} onChange={setComercializadora} options={comercializadoras}/>
-                <SelectField label="Tipo de instalação" value={instalacao} onChange={(v) => onChangeInstalacao(v)} options={["MT", "BTE", "BTN"]}/>
-                <SelectField label="Ciclo" value={ciclo} onChange={(v) => { setCiclo(v); resetPrecos(); }} options={ciclosPorInstalacao[instalacao]}/>
-                <SelectField label="Unidade de preço" value={unidade} onChange={(v) => onChangeUnidade(v)} options={["/MWh", "/kWh"]}/>
-                <TextField label="Início do novo contrato" type="date" value={inicio} onChange={setInicio}/>
-                <TextField label="Prazo (meses)" type="number" value={String(prazoMeses)} onChange={(v) => setPrazoMeses(Number(v) || 0)}/>
+                <SelectField
+                  label="Comercializadora"
+                  value={comercializadora}
+                  onChange={setComercializadora}
+                  options={[
+                    "EDP Comercial",
+                    "Endesa Energia",
+                    "Iberdrola Clientes Portugal",
+                    "Galp Power",
+                    "Repsol",
+                    "Goldenergy",
+                    "Axpo Iberia",
+                    "Audax",
+                    "TotalEnergies",
+                    "Naturgy",
+                    "Outra",
+                  ]}
+                />
+                <SelectField
+                  label="Tipo de instalação"
+                  value={instalacao}
+                  onChange={(v) => onChangeInstalacao(v as any)}
+                  options={["MT", "BTE", "BTN"]}
+                />
+                <SelectField
+                  label="Ciclo"
+                  value={ciclo}
+                  onChange={(v) => {
+                    setCiclo(v);
+                    resetPrecos();
+                  }}
+                  options={ciclosPorInstalacao[instalacao]}
+                />
+                <SelectField
+                  label="Unidade de preço"
+                  value={unidade}
+                  onChange={(v) => onChangeUnidade(v)}
+                  options={["/MWh", "/kWh"]}
+                />
+                <TextField
+                  label="Início do novo contrato"
+                  type="date"
+                  value={inicio}
+                  onChange={setInicio}
+                />
+                <TextField
+                  label="Prazo (meses)"
+                  type="number"
+                  value={String(prazoMeses)}
+                  onChange={(v) => setPrazoMeses(Number(v) || 0)}
+                />
               </div>
 
               <div className="my-4" />
 
-              {/* Preços */}
-              <h3 className="mb-2 text-base font-medium">Preços da proposta do cliente ({unidade})</h3>
+              {/* Preços do cliente */}
+              <h3 className="mb-2 text-base font-medium">
+                Preços da proposta do cliente ({unidade})
+              </h3>
               <div className="grid gap-3 md:grid-cols-4">
                 {camposTarifas.map((c) => (
                   <TextField
@@ -604,10 +675,14 @@ export default function B2PSimuladorOMIP() {
                 ))}
               </div>
 
-              {/* Linha nova (abaixo dos preços) */}
+              {/* Linha extra logo abaixo dos preços */}
               <div className="mt-4 grid gap-3 md:grid-cols-4">
                 <label className="col-span-2 flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm">
-                  <input type="checkbox" checked={includeNetworks} onChange={(e) => setIncludeNetworks(e.target.checked)} />
+                  <input
+                    type="checkbox"
+                    checked={includeNetworks}
+                    onChange={(e) => setIncludeNetworks(e.target.checked)}
+                  />
                   <span>Os preços informados incluem redes?</span>
                 </label>
 
@@ -623,28 +698,30 @@ export default function B2PSimuladorOMIP() {
               </div>
 
               <div className="mt-6 flex items-center gap-3">
-                <button onClick={resetPrecos} className="rounded-xl border border-slate-200 px-4 py-2 text-sm hover:bg-slate-50">
+                <button
+                  onClick={resetPrecos}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-sm hover:bg-slate-50"
+                >
                   Limpar preços
                 </button>
                 <button
-                  onClick={() => {
-                    setHasSimulated(true);
-                    setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
-                  }}
-                  disabled={!canSimulate}
+                  onClick={handleSimulate}
+                  disabled={!canSimulate || !inicio || !prazoMeses}
                   className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-50"
                 >
                   Ver a simulação
                 </button>
               </div>
 
-              {!emailVerified && <div className="pointer-events-none absolute inset-0 rounded-2xl border-2 border-dashed border-slate-200"></div>}
+              {!emailVerified && (
+                <div className="pointer-events-none absolute inset-0 rounded-2xl border-2 border-dashed border-slate-200"></div>
+              )}
             </div>
           </section>
 
-          {/* Coluna direita: SEMPRE visível */}
+          {/* Coluna direita: Resultado + Minhas simulações (sempre visíveis) */}
           <section className="space-y-6">
-            {/* Cartão Resultado automático */}
+            {/* Resultado automático */}
             <aside ref={resultRef} className="rounded-2xl bg-white p-5 shadow-sm">
               <h2 className="mb-4 text-lg font-medium">Resultado automático</h2>
 
@@ -652,33 +729,51 @@ export default function B2PSimuladorOMIP() {
                 <div className="rounded-xl border border-slate-200 p-3 text-sm text-slate-600">
                   Clique em <strong>“Ver a simulação”</strong> no Passo 2 para calcular e ver os resultados.
                 </div>
+              ) : simLoading ? (
+                <div className="rounded-xl border border-slate-200 p-3 text-sm">A calcular…</div>
+              ) : !sim ? (
+                <div className="rounded-2xl border border-slate-200 p-3 text-sm">Sem dados.</div>
               ) : (
                 <div className="grid gap-3">
-                  <InfoRow label="Preço médio do cliente" value={formatMWh(precoMedioClienteMWh)} />
+                  <InfoRow label="Média OMIP (período)" value={fmtMWh(sim.omip_avg_mwh)} />
+                  <InfoRow label="ERIC" value={fmtMWh(sim.eric_eur_mwh)} />
+                  <InfoRow label="REN" value={fmtMWh(sim.ren_eur_mwh)} />
                   <InfoRow
-                    label={`Referência de mercado (ajustada)${refUpdatedAt ? ` · ${new Date(refUpdatedAt).toLocaleDateString("pt-PT")}` : ""}`}
-                    value={formatMWh(referenciaMercadoMWh)}
+                    label="Perdas (%)"
+                    value={
+                      Number.isFinite(sim.losses_percent)
+                        ? `${sim.losses_percent.toFixed(2)} %`
+                        : "—"
+                    }
                   />
-                  <InfoRow label="Desvio absoluto" value={formatMWh(desvioAbs)} />
+                  <InfoRow label="Referência (ajustada)" value={fmtMWh(sim.reference_mwh)} />
+                  <div className="my-1 h-px w-full bg-slate-100" />
+                  <InfoRow label="Preço médio do cliente (bruto)" value={fmtMWh(sim.client_avg_mwh)} />
+                  <InfoRow label="Preço de rede considerado" value={fmtMWh(sim.network_eur_mwh)} />
+                  <InfoRow
+                    label="Preço do cliente (energia)"
+                    value={fmtMWh(sim.client_energy_avg_mwh)}
+                  />
                   <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 p-3">
                     <div className="text-sm text-slate-600">Desvio percentual</div>
                     <div className={`rounded-full px-2 py-1 text-xs font-medium ${badgeClass}`}>
-                      {formatPct(desvioPct)} {status === "acima" ? "acima" : status === "abaixo" ? "abaixo" : status === "alinhado" ? "(alinhado)" : ""}
+                      {fmtPct(sim.deviation_pct)}{" "}
+                      {Number.isFinite(sim.deviation_pct)
+                        ? sim.deviation_pct > 0
+                          ? "acima"
+                          : sim.deviation_pct < 0
+                          ? "abaixo"
+                          : "(alinhado)"
+                        : ""}
                     </div>
                   </div>
 
-                  <div className="mt-2 rounded-xl border border-slate-200 p-3 text-sm">
-                    <p className="mb-2 font-medium">Interpretação</p>
-                    {Number.isNaN(desvioPct) ? (
-                      <p>Introduza os preços e garanta que a referência foi carregada para ver o resultado.</p>
-                    ) : desvioPct > 0 ? (
-                      <p>A proposta analisada está <strong>{formatPct(desvioPct)}</strong> acima da referência ajustada. Podemos negociar ou comparar alternativas.</p>
-                    ) : desvioPct < 0 ? (
-                      <p>A proposta analisada está <strong>{formatPct(desvioPct)}</strong> abaixo da referência ajustada. Ainda assim, valide condições contratuais e eventuais taxas.</p>
-                    ) : (
-                      <p>Preço alinhado com o mercado. Compare cláusulas e serviços adicionais.</p>
-                    )}
-                  </div>
+                  {sim.months_missing?.length ? (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                      Aviso: faltam dados OMIP para {sim.months_missing.length} mês(es):{" "}
+                      {sim.months_missing.join(", ")}. A média foi calculada com os meses disponíveis.
+                    </div>
+                  ) : null}
 
                   <button
                     onClick={handleSaveSimulation}
@@ -692,17 +787,18 @@ export default function B2PSimuladorOMIP() {
               )}
             </aside>
 
-            {/* Cartão Minhas simulações — sempre visível */}
+            {/* Minhas simulações */}
             <aside className="rounded-2xl bg-white p-5 shadow-sm">
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-medium">Minhas simulações</h3>
                 {emailVerified && (
-                  <button onClick={refreshMySims} className="text-xs underline hover:no-underline">Atualizar</button>
+                  <button onClick={refreshMySims} className="text-xs underline hover:no-underline">
+                    Atualizar
+                  </button>
                 )}
               </div>
-
               {!emailVerified ? (
-                // em branco até validar o email
+                // Em branco até validar email
                 <div style={{ minHeight: 48 }} />
               ) : !mySims || mySims.length === 0 ? (
                 <p className="text-xs text-slate-500">Sem simulações gravadas.</p>
@@ -717,7 +813,9 @@ export default function B2PSimuladorOMIP() {
                           className="w-full text-left rounded-lg border border-slate-100 px-3 py-2 text-xs hover:bg-slate-50"
                           title="Carregar simulação"
                         >
-                          <div className="font-medium">{item.nif || "—"} — {item.supplier || "—"}</div>
+                          <div className="font-medium">
+                            {item.nif || "—"} — {item.supplier || "—"}
+                          </div>
                           <div className="text-slate-500">{when}</div>
                         </button>
                       </li>
@@ -731,7 +829,7 @@ export default function B2PSimuladorOMIP() {
 
         {/* Rodapé */}
         <footer className="mt-8 text-center text-xs text-slate-500">
-          © {new Date().getFullYear()} Plataforma gratuita · Protótipo interno para validação de conceito
+          © {new Date().getFullYear()} Plataforma gratuita · Protótipo interno
         </footer>
       </div>
 
@@ -745,8 +843,9 @@ export default function B2PSimuladorOMIP() {
   );
 }
 
-/* ================== UI helpers ================== */
-
+/* ============================================================
+   UI helpers
+   ============================================================ */
 function TextField({
   label,
   value,
