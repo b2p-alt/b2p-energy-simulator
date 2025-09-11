@@ -1,678 +1,435 @@
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
 
-// Página principal — Simulador/Comparador
-// Versão com: consentimentos (legal + marketing), toggle "inclui redes?",
-// consumo anual opcional, botão "Gravar simulação" e lista de simulações do utilizador.
-// Requer as rotas:
-//  - POST /api/validate-email, POST /api/send-confirmation, GET /api/confirm-status
-//  - POST /api/user/consent, GET /api/simulations/list, GET /api/simulations/[id], POST /api/simulations/save
+import { useMemo, useRef, useState } from "react";
 
-export default function B2PSimuladorOMIP() {
-  // ===== Passo 1: Email + validação =====
-  const [email, setEmail] = useState("");
-  const [emailStatus, setEmailStatus] = useState<
-    "idle" | "invalid" | "checking" | "blocked" | "sent" | "verified"
-  >("idle");
-  const [msg, setMsg] = useState<string>("");
+type PriceFields = {
+  ponta: string;
+  cheia: string;
+  vazio: string;
+  superVazio: string;
+};
 
-  // Consentimentos
-  const [termsAccepted, setTermsAccepted] = useState(false);
-  const [marketingOptIn, setMarketingOptIn] = useState(false);
+type FormState = {
+  nif?: string;
+  empresa?: string;
+  responsavel?: string;
 
-  // Helpers de validação local (formato)
-  const isValidEmailFormat = (value: string) => {
-    const re = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
-    return re.test(value.trim());
-  };
+  comercializadora?: string;
+  tipoInstalacao?: "AT" | "MT" | "BTE" | "BTN";
+  ciclo?: "Semanal" | "Diário";
 
-  // --- API client (placeholders) ---
-  async function apiValidateEmail(email: string) {
-    const res = await fetch("/api/validate-email", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email }),
-    });
-    if (!res.ok) throw new Error("Falha na validação do email");
-    return (await res.json()) as {
-      status: "deliverable" | "risky" | "undeliverable" | "disposable" | "role";
-      reason?: string;
-    };
-  }
+  unidadePreco?: "/MWh" | "/kWh";
+  inicioContrato?: string; // yyyy-mm-dd
+  prazoMeses?: number;
 
-  async function apiSendConfirmation(email: string) {
-    const res = await fetch("/api/send-confirmation", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email }),
-    });
-    if (!res.ok) throw new Error("Não foi possível enviar o email de confirmação");
-    return (await res.json()) as { ok: boolean };
-  }
+  // Preços (sempre string no input; converto no submit)
+  precos: PriceFields;
 
-  async function apiConfirmStatus(email: string) {
-    const url = new URL("/api/confirm-status", window.location.origin);
-    url.searchParams.set("email", email);
-    const res = await fetch(url.toString(), { method: "GET" });
-    if (!res.ok) throw new Error("Erro ao verificar confirmação");
-    return (await res.json()) as { verified: boolean };
-  }
+  // NOVOS CAMPOS:
+  incluiRedes?: boolean;
+  consumoAnualEstimadoMWh?: number | undefined; // opcional
+};
 
-  async function persistConsentIfNeeded() {
-    if (!email) return;
-    try {
-      await fetch("/api/user/consent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, termsAccepted, marketingOptIn }),
-      });
-    } catch {}
-  }
-
-  // Fluxo: validar -> enviar confirmação -> aguardar clique do utilizador no link
-  const handleSendConfirmation = async () => {
-    setMsg("");
-    if (!isValidEmailFormat(email)) {
-      setEmailStatus("invalid");
-      setMsg("Por favor, introduza um email válido.");
-      return;
-    }
-    try {
-      // (opcional) exigir termos marcados para enviar confirmação
-      if (!termsAccepted) {
-        setMsg("É necessário concordar com os Termos e a Política para continuar.");
-        return;
-      }
-
-      setEmailStatus("checking");
-      const result = await apiValidateEmail(email);
-      if (result.status === "undeliverable" || result.status === "disposable" || result.status === "role") {
-        setEmailStatus("blocked");
-        setMsg(
-          result.status === "undeliverable"
-            ? "Este email não é entregável. Tente outro endereço."
-            : result.status === "disposable"
-            ? "Emails descartáveis não são permitidos. Use um email corporativo."
-            : "Emails genéricos (ex.: info@, sales@) não são permitidos. Use um email de um responsável."
-        );
-        return;
-      }
-      // deliverable/risky → envia confirmação
-      await apiSendConfirmation(email);
-      await persistConsentIfNeeded();
-      setEmailStatus("sent");
-      setMsg("Enviámos um email de confirmação. Clique no link e depois selecione \"Já confirmei\".");
-    } catch (e: any) {
-      setEmailStatus("invalid");
-      setMsg(e?.message || "Ocorreu um erro ao validar o email.");
-    }
-  };
-
-  // Botão "Já confirmei": verifica no backend o estado (token clicado no email)
-  const handleManualConfirm = async () => {
-    setMsg("");
-    try {
-      const { verified } = await apiConfirmStatus(email);
-      if (verified) {
-        setEmailStatus("verified");
-        setMsg("Email validado com sucesso.");
-      } else {
-        setMsg("Ainda não recebemos a confirmação. Verifique a sua caixa de entrada (e spam).");
-      }
-    } catch (e: any) {
-      setMsg(e?.message || "Erro ao verificar o estado de confirmação.");
-    }
-  };
-
-  // Opcional: ao trocar email válido, atualizar lista de simulações do utilizador
-  useEffect(() => {
-    if (isValidEmailFormat(email)) refreshMySims();
-    else setMySims([]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [email]);
-
-  const emailVerified = emailStatus === "verified"; // manter comportamento atual
-
-  // ===== Passo 2: Dados da instalação / contrato =====
-  const [empresa, setEmpresa] = useState({
-    nif: "",
-    nome: "",
-    responsavel: "",
-  });
-
-  const [instalacao, setInstalacao] = useState("MT"); // MT | BTE | BTN
-  const [ciclo, setCiclo] = useState("Semanal");
-  const [inicio, setInicio] = useState(""); // YYYY-MM-DD
-  const [prazoMeses, setPrazoMeses] = useState(12);
-  const [unidade, setUnidade] = useState("/MWh"); // "/MWh" | "/kWh"
-  const [comercializadora, setComercializadora] = useState("");
-
-  // Novos campos do Passo 2
-  const [includeNetworks, setIncludeNetworks] = useState(false);
-  const [annualConsumption, setAnnualConsumption] = useState<string>("");
-
-  // Principais comercializadoras (ajustável)
-  const comercializadoras = [
-    "EDP Comercial",
-    "Endesa Energia",
-    "Iberdrola Clientes Portugal",
-    "Galp Power",
-    "Repsol",
-    "Goldenergy",
-    "Axpo Iberia",
-    "Audax",
-    "TotalEnergies",
-    "Naturgy",
-    "Outra",
-  ];
-
-  // Inputs de preços por tarifa (valores do cliente)
-  const [precos, setPrecos] = useState({
-    // MT/BTE
+const DEFAULT_FORM: FormState = {
+  comercializadora: "EDP Comercial",
+  tipoInstalacao: "MT",
+  ciclo: "Semanal",
+  unidadePreco: "/MWh",
+  prazoMeses: 12,
+  precos: {
     ponta: "",
     cheia: "",
     vazio: "",
-    svazio: "",
-    // BTN Simples/Bi/Tri
-    simples: "",
-    bi_cheia: "",
-    bi_vazio: "",
-    tri_ponta: "",
-    tri_cheia: "",
-    tri_vazio: "",
-  });
+    superVazio: "",
+  },
+  incluiRedes: false,
+  consumoAnualEstimadoMWh: undefined,
+};
 
-  // "Backoffice" simplificado (valores de referência para comparação)
-  const [admin, setAdmin] = useState({
-    omipBase: "120", // €/MWh (exemplo)
-    perdasPercent: "2.5", // % sobre OMIP
-    eric: "3.0", // €/MWh
-    ren: "1.5", // €/MWh (ou outros custos regulatórios)
-  });
+function parseNumberOrUndefined(v: string): number | undefined {
+  if (v == null) return undefined;
+  const trimmed = v.trim().replace(/\./g, "").replace(",", ".");
+  if (trimmed === "") return undefined;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : undefined;
+}
 
-  // Opções de ciclo por tipo de instalação
-  const ciclosPorInstalacao: Record<string, string[]> = {
-    MT: ["Semanal", "Semanal opcional"],
-    BTE: ["Diário", "Semanal"],
-    BTN: ["Simples", "Bi-horário", "Tri-horário"],
-  };
+export default function Page() {
+  const [form, setForm] = useState<FormState>(DEFAULT_FORM);
+  const topRef = useRef<HTMLDivElement>(null);
 
-  // Campos de preço a mostrar consoante instalação/ciclo
-  const camposTarifas = useMemo(() => {
-    if (instalacao === "MT") {
-      return [
-        { key: "ponta", label: "Ponta" },
-        { key: "cheia", label: "Cheia" },
-        { key: "vazio", label: "Vazio" },
-        { key: "svazio", label: "Super Vazio" },
-      ];
+  const canSubmit = useMemo(() => {
+    // critério mínimo: ter pelo menos um preço preenchido
+    const { ponta, cheia, vazio, superVazio } = form.precos;
+    return [ponta, cheia, vazio, superVazio].some((v) => v && v.trim() !== "");
+  }, [form.precos]);
+
+  function updatePrice(field: keyof PriceFields, value: string) {
+    setForm((f) => ({ ...f, precos: { ...f.precos, [field]: value } }));
+  }
+
+  function resetPrices() {
+    setForm((f) => ({
+      ...f,
+      precos: { ponta: "", cheia: "", vazio: "", superVazio: "" },
+    }));
+  }
+
+  function scrollToTop() {
+    topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+
+    // Monta payload: só envia o que fizer sentido
+    const payload: any = {
+      nif: form.nif?.trim() || undefined,
+      empresa: form.empresa?.trim() || undefined,
+      responsavel: form.responsavel?.trim() || undefined,
+
+      comercializadora: form.comercializadora,
+      tipoInstalacao: form.tipoInstalacao,
+      ciclo: form.ciclo,
+
+      unidadePreco: form.unidadePreco,
+      inicioContrato: form.inicioContrato || undefined,
+      prazoMeses: form.prazoMeses ?? undefined,
+
+      // preços convertidos para número (se preenchidos)
+      precos: {
+        ponta: parseNumberOrUndefined(form.precos.ponta),
+        cheia: parseNumberOrUndefined(form.precos.cheia),
+        vazio: parseNumberOrUndefined(form.precos.vazio),
+        superVazio: parseNumberOrUndefined(form.precos.superVazio),
+      },
+    };
+
+    // Envia NOVOS CAMPOS somente quando aplicável
+    if (form.incluiRedes) payload.incluiRedes = true;
+    if (
+      typeof form.consumoAnualEstimadoMWh === "number" &&
+      Number.isFinite(form.consumoAnualEstimadoMWh)
+    ) {
+      payload.consumoAnualEstimadoMWh = form.consumoAnualEstimadoMWh;
     }
-    if (instalacao === "BTE") {
-      return [
-        { key: "ponta", label: "Ponta" },
-        { key: "cheia", label: "Cheia" },
-        { key: "vazio", label: "Vazio" },
-        { key: "svazio", label: "Super Vazio" },
-      ];
-    }
-    // BTN
-    if (ciclo === "Simples") {
-      return [{ key: "simples", label: "Simples" }];
-    }
-    if (ciclo === "Bi-horário") {
-      return [
-        { key: "bi_cheia", label: "Cheia" },
-        { key: "bi_vazio", label: "Vazio" },
-      ];
-    }
-    // Tri-horário
-    return [
-      { key: "tri_ponta", label: "Ponta" },
-      { key: "tri_cheia", label: "Cheia" },
-      { key: "tri_vazio", label: "Vazio" },
-    ];
-  }, [instalacao, ciclo]);
 
-  // Utils
-  const parse = (v: string) => {
-    const n = Number(String(v).replace(",", "."));
-    return Number.isFinite(n) ? n : NaN;
-  };
-  const toMWh = (value: number) => (unidade === "/kWh" ? value * 1000 : value);
-
-  // Cálculo do preço médio do cliente (média simples dos campos visíveis)
-  const precoMedioClienteMWh = useMemo(() => {
-    const vals: number[] = [];
-    camposTarifas.forEach((c) => {
-      const raw = parse((precos as any)[c.key]);
-      if (!Number.isNaN(raw)) vals.push(toMWh(raw));
+    // Chamada de API (ajusta a rota conforme o teu backend)
+    await fetch("/api/simulations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
-    if (vals.length === 0) return NaN;
-    const soma = vals.reduce((a, b) => a + b, 0);
-    return soma / vals.length; // média simples
-  }, [camposTarifas, precos, unidade]);
 
-  // Referência de mercado ajustada: OMIP + perdas%*OMIP + ERIC + REN
-  const referenciaMercadoMWh = useMemo(() => {
-    const omip = parse(admin.omipBase);
-    const perdasPct = parse(admin.perdasPercent) / 100;
-    const eric = parse(admin.eric);
-    const ren = parse(admin.ren);
-    if ([omip, perdasPct, eric, ren].some((x) => Number.isNaN(x))) return NaN;
-    return omip * (1 + perdasPct) + eric + ren;
-  }, [admin]);
-
-  const desvioAbs = useMemo(() => {
-    if (Number.isNaN(precoMedioClienteMWh) || Number.isNaN(referenciaMercadoMWh)) return NaN;
-    return precoMedioClienteMWh - referenciaMercadoMWh;
-  }, [precoMedioClienteMWh, referenciaMercadoMWh]);
-
-  const desvioPct = useMemo(() => {
-    if (Number.isNaN(desvioAbs) || Number.isNaN(referenciaMercadoMWh) || referenciaMercadoMWh === 0) return NaN;
-    return (desvioAbs / referenciaMercadoMWh) * 100;
-  }, [desvioAbs, referenciaMercadoMWh]);
-
-  const status = Number.isNaN(desvioAbs)
-    ? "neutro"
-    : desvioAbs > 0
-    ? "acima"
-    : desvioAbs < 0
-    ? "abaixo"
-    : "alinhado";
-
-  const resetPrecos = () => {
-    setPrecos({
-      ponta: "",
-      cheia: "",
-      vazio: "",
-      svazio: "",
-      simples: "",
-      bi_cheia: "",
-      bi_vazio: "",
-      tri_ponta: "",
-      tri_cheia: "",
-      tri_vazio: "",
-    });
-  };
-
-  const onChangeInstalacao = (val: string) => {
-    setInstalacao(val);
-    const ciclos = ciclosPorInstalacao[val];
-    setCiclo(ciclos?.[0] ?? "");
-    resetPrecos();
-  };
-
-  // UI helpers
-  const badgeClass =
-    status === "acima"
-      ? "bg-red-100 text-red-700"
-      : status === "abaixo"
-      ? "bg-green-100 text-green-700"
-      : status === "alinhado"
-      ? "bg-yellow-100 text-yellow-700"
-      : "bg-gray-100 text-gray-700";
-
-  const formatMWh = (n: number) => (Number.isNaN(n) ? "—" : `${n.toFixed(2)} €/MWh`);
-  const formatPct = (n: number) => (Number.isNaN(n) ? "—" : `${n > 0 ? "+" : ""}${n.toFixed(1)}%`);
-
-  const disabledClass = emailVerified ? "" : "pointer-events-none opacity-50";
-
-  // ===== Lista de simulações do utilizador =====
-  const [mySims, setMySims] = useState<Array<{ id: string; created_at: string; nif: string | null; supplier: string | null }>>([]);
-
-  async function refreshMySims() {
-    if (!email) return;
-    try {
-      const res = await fetch(`/api/simulations/list?email=${encodeURIComponent(email)}`);
-      if (res.ok) {
-        const data = await res.json();
-        setMySims(data);
-      }
-    } catch {}
-  }
-
-  async function handleLoadSimulation(id: string) {
-    try {
-      const res = await fetch(`/api/simulations/${id}`);
-      if (!res.ok) return;
-      const s = await res.json();
-
-      // repõe no formulário
-      setEmpresa({ nif: s.nif || "", nome: s.company || "", responsavel: s.responsavel || "" });
-      setComercializadora(s.supplier || "");
-      setInstalacao(s.install_type);
-      setCiclo(s.cycle);
-      setUnidade(s.unit);
-      setInicio(s.start_date?.slice(0, 10) || "");
-      setPrazoMeses(s.term_months || 12);
-      setIncludeNetworks(!!s.client_prices_include_networks);
-      setAnnualConsumption(s.annual_consumption_mwh != null ? String(s.annual_consumption_mwh) : "");
-
-      setPrecos({
-        ponta: s.ponta?.toString() || "",
-        cheia: s.cheia?.toString() || "",
-        vazio: s.vazio?.toString() || "",
-        svazio: s.svazio?.toString() || "",
-        simples: s.simples?.toString() || "",
-        bi_cheia: s.bi_cheia?.toString() || "",
-        bi_vazio: s.bi_vazio?.toString() || "",
-        tri_ponta: s.tri_ponta?.toString() || "",
-        tri_cheia: s.tri_cheia?.toString() || "",
-        tri_vazio: s.tri_vazio?.toString() || "",
-      });
-
-      window.scrollTo({ top: 0, behavior: "smooth" });
-      setSaveMsg("Simulação carregada.");
-    } catch {}
-  }
-
-  const [saving, setSaving] = useState(false);
-  const [saveMsg, setSaveMsg] = useState("");
-
-  async function handleSaveSimulation() {
-    try {
-      setSaving(true);
-      setSaveMsg("");
-
-      await persistConsentIfNeeded();
-
-      const payload: any = {
-        email,
-        nif: empresa.nif || null,
-        company: empresa.nome || null,
-        responsavel: empresa.responsavel || null,
-        supplier: comercializadora || null,
-        install_type: instalacao,
-        cycle: ciclo,
-        unit: unidade,
-        start_date: inicio,
-        term_months: prazoMeses,
-        client_prices_include_networks: includeNetworks,
-        annual_consumption_mwh: annualConsumption ? Number(annualConsumption) : null,
-        // preços
-        ...precos,
-      };
-
-      const res = await fetch("/api/simulations/save", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || "Falha ao gravar simulação.");
-
-      setSaveMsg("Simulação gravada com sucesso.");
-
-      // Limpa formulário (mantém email)
-      setEmpresa({ nif: "", nome: "", responsavel: "" });
-      setComercializadora("");
-      setInstalacao("MT");
-      setCiclo("Semanal");
-      setUnidade("/MWh");
-      setInicio("");
-      setPrazoMeses(12);
-      setIncludeNetworks(false);
-      setAnnualConsumption("");
-      resetPrecos();
-
-      await refreshMySims();
-      window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
-    } catch (e: any) {
-      setSaveMsg(e?.message || "Erro ao gravar simulação.");
-    } finally {
-      setSaving(false);
-    }
+    // feedback simples (podes trocar por toast)
+    alert("Simulação enviada com sucesso.");
   }
 
   return (
-    <div className="min-h-screen w-full bg-slate-50 text-slate-900">
-      <div className="mx-auto max-w-5xl p-6">
-        {/* Header */}
-        <header className="mb-6 flex items-center justify-between">
-          <h1 className="text-2xl font-semibold">Comparador de Propostas · Plataforma gratuita (beta)</h1>
-          <span className="rounded-full bg-slate-200 px-3 py-1 text-xs">Protótipo</span>
-        </header>
+    <div ref={topRef} className="mx-auto max-w-5xl px-4 py-8">
+      <h1 className="mb-6 text-2xl font-semibold">Nova simulação</h1>
 
-        {/* Grid principal */}
-        <div className="grid gap-6 md:grid-cols-3">
-          {/* Coluna esquerda: formulário */}
-          <section className="md:col-span-2 space-y-6">
-            {/* Passo 1 */}
-            <div className="rounded-2xl bg-white p-5 shadow-sm">
-              <h2 className="mb-2 text-lg font-medium">Passo 1 — Dados do cliente</h2>
-              <p className="mb-4 text-sm text-slate-600">Introduza o seu email para validar o acesso ao simulador. Após confirmar o email, desbloqueia o passo 2.</p>
+      <form onSubmit={handleSubmit} className="space-y-8">
+        {/* Cabeçalho de dados básicos */}
+        <section className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <div className="grid gap-2">
+            <label htmlFor="nif" className="text-sm font-medium">
+              NIF da empresa
+            </label>
+            <input
+              id="nif"
+              className="w-full rounded-lg border px-3 py-2"
+              placeholder="XXXXXXXXX"
+              value={form.nif ?? ""}
+              onChange={(e) => setForm((f) => ({ ...f, nif: e.target.value }))}
+            />
+          </div>
 
-              <div className="grid gap-3 md:grid-cols-2">
-                <TextField label="Email de contacto" type="email" value={email} onChange={(v)=>{ setEmail(v); setEmailStatus("idle"); setMsg(""); }} placeholder="email@empresa.pt"/>
-              </div>
+          <div className="grid gap-2">
+            <label htmlFor="empresa" className="text-sm font-medium">
+              Empresa
+            </label>
+            <input
+              id="empresa"
+              className="w-full rounded-lg border px-3 py-2"
+              placeholder="Nome legal"
+              value={form.empresa ?? ""}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, empresa: e.target.value }))
+              }
+            />
+          </div>
 
-              {/* Consentimentos */}
-              <div className="mt-3 space-y-2 text-sm">
-                <label className="flex items-start gap-2">
-                  <input type="checkbox" checked={termsAccepted} onChange={(e)=>setTermsAccepted(e.target.checked)} />
-                  <span>Li e concordo com os <a className="underline" href="#" onClick={(e)=>e.preventDefault()}>Termos</a> e a <a className="underline" href="#" onClick={(e)=>e.preventDefault()}>Política de Privacidade</a>.</span>
-                </label>
-                <label className="flex items-start gap-2">
-                  <input type="checkbox" checked={marketingOptIn} onChange={(e)=>setMarketingOptIn(e.target.checked)} />
-                  <span>Concordo em receber comunicações comerciais por email.</span>
-                </label>
-              </div>
+          <div className="grid gap-2">
+            <label htmlFor="responsavel" className="text-sm font-medium">
+              Responsável
+            </label>
+            <input
+              id="responsavel"
+              className="w-full rounded-lg border px-3 py-2"
+              placeholder="Nome e cargo"
+              value={form.responsavel ?? ""}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, responsavel: e.target.value }))
+              }
+            />
+          </div>
+        </section>
 
-              <div className="mt-4 flex flex-wrap items-center gap-3">
-                <button onClick={handleSendConfirmation} className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800">
-                  {emailStatus === "checking" ? "A validar..." : "Enviar email de confirmação"}
-                </button>
-                <button onClick={handleManualConfirm} className="rounded-xl border border-slate-200 px-4 py-2 text-sm hover:bg-slate-50">Já confirmei</button>
-                {msg && <span className={`text-sm ${emailStatus === "invalid" || emailStatus === "blocked" ? "text-red-600" : "text-emerald-700"}`}>{msg}</span>}
-                {emailStatus === "sent" && (
-                  <span className="rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-700">Aguardando confirmação</span>
-                )}
-                {emailVerified && (
-                  <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs text-emerald-700">Email validado</span>
-                )}
+        {/* Parametrização */}
+        <section className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Comercializadora</label>
+            <select
+              className="w-full rounded-lg border px-3 py-2"
+              value={form.comercializadora}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, comercializadora: e.target.value }))
+              }
+            >
+              <option>EDP Comercial</option>
+              <option>Galp</option>
+              <option>Iberdrola</option>
+              <option>Goldenergy</option>
+              <option>Endesa</option>
+            </select>
+          </div>
+
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Tipo de instalação</label>
+            <select
+              className="w-full rounded-lg border px-3 py-2"
+              value={form.tipoInstalacao}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  tipoInstalacao: e.target.value as FormState["tipoInstalacao"],
+                }))
+              }
+            >
+              <option value="AT">AT</option>
+              <option value="MT">MT</option>
+              <option value="BTE">BTE</option>
+              <option value="BTN">BTN</option>
+            </select>
+          </div>
+
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Ciclo</label>
+            <select
+              className="w-full rounded-lg border px-3 py-2"
+              value={form.ciclo}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  ciclo: e.target.value as FormState["ciclo"],
+                }))
+              }
+            >
+              <option value="Semanal">Semanal</option>
+              <option value="Diário">Diário</option>
+            </select>
+          </div>
+
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Unidade de preço</label>
+            <select
+              className="w-full rounded-lg border px-3 py-2"
+              value={form.unidadePreco}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  unidadePreco: e.target.value as FormState["unidadePreco"],
+                }))
+              }
+            >
+              <option value="/MWh">/MWh</option>
+              <option value="/kWh">/kWh</option>
+            </select>
+          </div>
+
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Início do novo contrato</label>
+            <input
+              type="date"
+              className="w-full rounded-lg border px-3 py-2"
+              value={form.inicioContrato ?? ""}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, inicioContrato: e.target.value }))
+              }
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Prazo (meses)</label>
+            <input
+              type="number"
+              min={1}
+              className="w-full rounded-lg border px-3 py-2"
+              value={form.prazoMeses ?? 12}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  prazoMeses: Number(e.target.value || 0),
+                }))
+              }
+            />
+          </div>
+        </section>
+
+        {/* PREÇOS DA PROPOSTA */}
+        <section>
+          <h2 className="mb-3 text-lg font-semibold">
+            Preços da proposta do cliente ({form.unidadePreco})
+          </h2>
+
+          {/* Linha de 4 preços */}
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Ponta</label>
+              <div className="relative">
+                <input
+                  inputMode="decimal"
+                  placeholder="0,000"
+                  className="w-full rounded-lg border px-3 py-2 pr-16"
+                  value={form.precos.ponta}
+                  onChange={(e) => updatePrice("ponta", e.target.value)}
+                />
+                <span className="pointer-events-none absolute inset-y-0 right-3 inline-flex items-center text-sm text-gray-500">
+                  {form.unidadePreco}
+                </span>
               </div>
             </div>
 
-            {/* Passo 2 */}
-            <div className={`relative rounded-2xl bg-white p-5 shadow-sm ${disabledClass}`}>
-              <div className="flex items-center justify-between">
-                <h2 className="mb-2 text-lg font-medium">Passo 2 — Dados da instalação</h2>
-                {!emailVerified && (
-                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">Bloqueado até validar email</span>
-                )}
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Cheia</label>
+              <div className="relative">
+                <input
+                  inputMode="decimal"
+                  placeholder="0,000"
+                  className="w-full rounded-lg border px-3 py-2 pr-16"
+                  value={form.precos.cheia}
+                  onChange={(e) => updatePrice("cheia", e.target.value)}
+                />
+                <span className="pointer-events-none absolute inset-y-0 right-3 inline-flex items-center text-sm text-gray-500">
+                  {form.unidadePreco}
+                </span>
               </div>
-              <p className="mb-4 text-sm text-slate-600">Preencha os dados para obter o resultado e/ou gravar a simulação. É rápido e direto.</p>
-
-              {/* Identificação */}
-              <div className="grid gap-3 md:grid-cols-3">
-                <TextField label="NIF da empresa" value={empresa.nif} onChange={(v)=>setEmpresa({...empresa,nif:v})} placeholder="XXXXXXXXX"/>
-                <TextField label="Empresa" value={empresa.nome} onChange={(v)=>setEmpresa({...empresa,nome:v})} placeholder="Nome legal"/>
-                <TextField label="Responsável" value={empresa.responsavel} onChange={(v)=>setEmpresa({...empresa,responsavel:v})} placeholder="Nome e cargo"/>
-              </div>
-
-              <div className="my-4 h-px w-full bg-slate-100" />
-
-              <div className="grid gap-3 md:grid-cols-3">
-                <SelectField label="Comercializadora" value={comercializadora} onChange={setComercializadora} options={comercializadoras} />
-                <SelectField label="Tipo de instalação" value={instalacao} onChange={(v) => onChangeInstalacao(v)} options={["MT", "BTE", "BTN"]} />
-                <SelectField label="Ciclo" value={ciclo} onChange={(v) => { setCiclo(v); resetPrecos(); }} options={ciclosPorInstalacao[instalacao]} />
-                <SelectField label="Unidade de preço" value={unidade} onChange={setUnidade} options={["/MWh", "/kWh"]} />
-                <TextField label="Início do novo contrato" type="date" value={inicio} onChange={setInicio} />
-                <TextField label="Prazo (meses)" type="number" value={String(prazoMeses)} onChange={(v)=>setPrazoMeses(Number(v)||0)} />
-
-                {/* Novos campos */}
-                <label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={includeNetworks} onChange={(e)=>setIncludeNetworks(e.target.checked)} />
-                  <span>Os preços informados incluem redes?</span>
-                </label>
-                <TextField label="Consumo anual estimado (MWh)" type="number" value={annualConsumption} onChange={setAnnualConsumption} placeholder="opcional" />
-              </div>
-
-              <div className="my-4" />
-
-              <h3 className="mb-2 text-base font-medium">Preços da proposta do cliente ({unidade})</h3>
-              <div className="grid gap-3 md:grid-cols-4">
-                {camposTarifas.map((c) => (
-                  <TextField
-                    key={c.key}
-                    label={c.label}
-                    type="number"
-                    step="any"
-                    value={(precos as any)[c.key] as string}
-                    onChange={(v) => setPrecos((p) => ({ ...p, [c.key]: v }))}
-                    placeholder={`0,000 ${unidade}`}
-                  />
-                ))}
-              </div>
-
-              <div className="mt-6 flex items-center gap-3">
-                <button onClick={resetPrecos} className="rounded-xl border border-slate-200 px-4 py-2 text-sm hover:bg-slate-50">Limpar preços</button>
-                <button onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800">Subir ao topo</button>
-              </div>
-
-              {!emailVerified && (
-                <div className="pointer-events-none absolute inset-0 rounded-2xl border-2 border-dashed border-slate-200"></div>
-              )}
-            </div>
-          </section>
-
-          {/* Coluna direita: resultado + gravação + lista */}
-          <aside className="rounded-2xl bg-white p-5 shadow-sm">
-            <h2 className="mb-4 text-lg font-medium">Resultado automático</h2>
-
-            <div className="grid gap-3">
-              <InfoRow label="Preço médio do cliente" value={formatMWh(precoMedioClienteMWh)} />
-              <InfoRow label="Referência de mercado (ajustada)" value={formatMWh(referenciaMercadoMWh)} />
-              <InfoRow label="Desvio absoluto" value={formatMWh(desvioAbs)} />
-              <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 p-3">
-                <div className="text-sm text-slate-600">Desvio percentual</div>
-                <div className={`rounded-full px-2 py-1 text-xs font-medium ${badgeClass}`}>
-                  {formatPct(desvioPct)} {status === "acima" ? "acima" : status === "abaixo" ? "abaixo" : status === "alinhado" ? "(alinhado)" : ""}
-                </div>
-              </div>
-
-              <div className="mt-2 rounded-xl border border-slate-200 p-3 text-sm">
-                <p className="mb-2 font-medium">Interpretação</p>
-                {Number.isNaN(desvioPct) ? (
-                  <p>Introduza os preços da proposta e os parâmetros de referência para ver o resultado.</p>
-                ) : desvioPct > 0 ? (
-                  <p>
-                    A proposta analisada está <strong>{formatPct(desvioPct)}</strong> acima da referência de mercado
-                    ajustada. Podemos tentar negociar ou comparar alternativas.
-                  </p>
-                ) : desvioPct < 0 ? (
-                  <p>
-                    A proposta analisada está <strong>{formatPct(desvioPct)}</strong> abaixo da referência de mercado
-                    ajustada. Ainda assim, valide condições contratuais e eventuais taxas ocultas.
-                  </p>
-                ) : (
-                  <p>Preço alinhado com o mercado. Vale comparar cláusulas e serviços adicionais.</p>
-                )}
-              </div>
-
-              {/* Botão Gravar simulação */}
-              <button
-                onClick={handleSaveSimulation}
-                disabled={saving}
-                className="mt-2 w-full rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-              >
-                {saving ? "A gravar..." : "Gravar simulação"}
-              </button>
-              {saveMsg && <p className="mt-2 text-sm">{saveMsg}</p>}
             </div>
 
-            {/* Lista de simulações do utilizador */}
-            <div className="mt-6 rounded-2xl border border-slate-200 p-4">
-              <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-sm font-medium">Minhas simulações</h3>
-                <button onClick={refreshMySims} className="text-xs underline hover:no-underline">Atualizar</button>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Vazio</label>
+              <div className="relative">
+                <input
+                  inputMode="decimal"
+                  placeholder="0,000"
+                  className="w-full rounded-lg border px-3 py-2 pr-16"
+                  value={form.precos.vazio}
+                  onChange={(e) => updatePrice("vazio", e.target.value)}
+                />
+                <span className="pointer-events-none absolute inset-y-0 right-3 inline-flex items-center text-sm text-gray-500">
+                  {form.unidadePreco}
+                </span>
               </div>
-              {(!mySims || mySims.length === 0) ? (
-                <p className="text-xs text-slate-500">Sem simulações gravadas.</p>
-              ) : (
-                <ul className="space-y-2">
-                  {mySims.map((item) => {
-                    const when = new Date(item.created_at).toISOString().slice(0, 10);
-                    return (
-                      <li key={item.id}>
-                        <button
-                          onClick={() => handleLoadSimulation(item.id)}
-                          className="w-full text-left rounded-lg border border-slate-100 px-3 py-2 text-xs hover:bg-slate-50"
-                          title="Carregar simulação"
-                        >
-                          <div className="font-medium">{item.nif || "—"} — {item.supplier || "—"}</div>
-                          <div className="text-slate-500">{when}</div>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
             </div>
-          </aside>
-        </div>
 
-        {/* Rodapé */}
-        <footer className="mt-8 text-center text-xs text-slate-500">
-          © {new Date().getFullYear()} Plataforma gratuita · Protótipo interno para validação de conceito
-        </footer>
-      </div>
-    </div>
-  );
-}
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Super Vazio</label>
+              <div className="relative">
+                <input
+                  inputMode="decimal"
+                  placeholder="0,000"
+                  className="w-full rounded-lg border px-3 py-2 pr-16"
+                  value={form.precos.superVazio}
+                  onChange={(e) => updatePrice("superVazio", e.target.value)}
+                />
+                <span className="pointer-events-none absolute inset-y-0 right-3 inline-flex items-center text-sm text-gray-500">
+                  {form.unidadePreco}
+                </span>
+              </div>
+            </div>
+          </div>
 
-function TextField({ label, value, onChange, type = "text", placeholder = "", step }: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  type?: string;
-  placeholder?: string;
-  step?: string;
-}) {
-  return (
-    <label className="flex flex-col gap-1 text-sm">
-      <span className="text-slate-600">{label}</span>
-      <input
-        className="rounded-xl border border-slate-200 px-3 py-2 outline-none ring-0 focus:border-slate-300"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        type={type}
-        placeholder={placeholder}
-        step={step}
-      />
-    </label>
-  );
-}
+          {/* NOVA LINHA: inclui redes + consumo anual estimado (logo abaixo dos preços) */}
+          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-4">
+            <div className="col-span-2 flex items-center gap-3 rounded-lg border px-3 py-2">
+              <input
+                id="incluiRedes"
+                type="checkbox"
+                className="h-4 w-4"
+                checked={!!form.incluiRedes}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, incluiRedes: e.target.checked }))
+                }
+              />
+              <label htmlFor="incluiRedes" className="text-sm">
+                Os preços informados incluem redes?
+              </label>
+            </div>
 
-function SelectField({ label, value, onChange, options }: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  options: string[];
-}) {
-  return (
-    <label className="flex flex-col gap-1 text-sm">
-      <span className="text-slate-600">{label}</span>
-      <select
-        className="rounded-xl border border-slate-200 bg-white px-3 py-2"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-      >
-        {options.map((opt) => (
-          <option key={opt} value={opt}>
-            {opt}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
+            <div className="col-span-2 grid gap-2">
+              <label htmlFor="consumoAnualEstimadoMWh" className="text-sm font-medium">
+                Consumo anual estimado (MWh) <span className="text-xs text-gray-500">(opcional)</span>
+              </label>
+              <input
+                id="consumoAnualEstimadoMWh"
+                type="number"
+                min={0}
+                step="0.001"
+                placeholder="ex.: 12,5"
+                inputMode="decimal"
+                className="w-full rounded-lg border px-3 py-2"
+                value={
+                  form.consumoAnualEstimadoMWh ?? ""
+                }
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    consumoAnualEstimadoMWh:
+                      e.target.value === "" ? undefined : Number(e.target.value),
+                  }))
+                }
+              />
+            </div>
+          </div>
 
-function InfoRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between rounded-xl border border-slate-100 p-3">
-      <div className="text-sm text-slate-600">{label}</div>
-      <div className="text-sm font-medium">{value}</div>
+          {/* Ações da secção de preços */}
+          <div className="mt-4 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={resetPrices}
+              className="rounded-lg border px-4 py-2 text-sm"
+            >
+              Limpar preços
+            </button>
+            <button
+              type="button"
+              onClick={scrollToTop}
+              className="rounded-lg border px-4 py-2 text-sm"
+            >
+              Subir ao topo
+            </button>
+          </div>
+        </section>
+
+        {/* Footer do formulário */}
+        <section className="flex items-center justify-end gap-3">
+          <button
+            type="button"
+            onClick={() => setForm(DEFAULT_FORM)}
+            className="rounded-lg border px-4 py-2"
+          >
+            Limpar formulário
+          </button>
+          <button
+            type="submit"
+            disabled={!canSubmit}
+            className="rounded-lg bg-black px-4 py-2 text-white disabled:opacity-40"
+          >
+            Guardar / Simular
+          </button>
+        </section>
+      </form>
     </div>
   );
 }
