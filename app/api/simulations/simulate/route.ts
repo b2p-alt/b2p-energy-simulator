@@ -1,20 +1,16 @@
-// app/api/simulations/simulate/route.ts
 import { NextResponse } from "next/server";
 import { Pool } from "pg";
 
-export const runtime = "nodejs";         // garantir Node runtime (não Edge)
-export const dynamic = "force-dynamic";  // evitar tentativa de geração estática
+export const runtime = "nodejs";         // garante Node runtime (pg não funciona no Edge)
+export const dynamic = "force-dynamic";  // evita cache estática para a rota
 
+// Usa DATABASE_URL (Neon) e, se faltar, POSTGRES_URL (Vercel Postgres)
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: process.env.DATABASE_URL ?? process.env.POSTGRES_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-// Cria o esquema canónico se não existir.
-// Tabelas utilizadas:
-// - omip_monthly_prices(month_ym TEXT PK 'YYYY-MM', price_eur_mwh DOUBLE PRECISION, source TEXT)
-// - network_params(install_type TEXT PK, eric_eur_mwh DOUBLE PRECISION, ren_eur_mwh DOUBLE PRECISION,
-//                  losses_percent DOUBLE PRECISION, network_eur_mwh DOUBLE PRECISION)
+// --- Cria tabelas se não existirem (canónicas p/ simulação) ---
 async function ensureSchema() {
   const sql = `
   create table if not exists omip_monthly_prices (
@@ -56,12 +52,12 @@ const toMWh = (v: number, unit: "/MWh" | "/kWh") => (unit === "/kWh" ? v * 1000 
 
 type Body = {
   install_type: "MT" | "BTE" | "BTN";
-  cycle: string; // mantido para futura extensão
+  cycle: string;
   unit: "/MWh" | "/kWh";
   start_date: string;   // YYYY-MM-DD
   term_months: number;  // ex.: 12
   include_networks?: boolean;
-  prices: Record<string, string>; // apenas os campos visíveis no formulário
+  prices: Record<string, string>; // apenas campos visíveis do formulário
 };
 
 export async function POST(req: Request) {
@@ -76,7 +72,7 @@ export async function POST(req: Request) {
   const clientAvgMWh =
     inputVals.length ? toMWh(inputVals.reduce((a, b) => a + b, 0) / inputVals.length, body.unit) : NaN;
 
-  // 2) Meses alvo
+  // 2) Meses alvo (YYYY-MM)
   const monthsYM = ymList(body.start_date, body.term_months);
 
   const c = await pool.connect();
@@ -95,29 +91,27 @@ export async function POST(req: Request) {
     const found = monthsYM.filter((m) => map.has(m));
     const missing = monthsYM.filter((m) => !map.has(m));
     const omipVals = found.map((m) => map.get(m)!) as number[];
-    const omipAvgMWh =
-      omipVals.length ? omipVals.reduce((a, b) => a + b, 0) / omipVals.length : NaN;
+    const omipAvgMWh = omipVals.length ? omipVals.reduce((a, b) => a + b, 0) / omipVals.length : NaN;
 
-    // 4) Parâmetros de rede
+    // 4) Parâmetros de rede por instalação
     const { rows: netRows } = await c.query(
-      `select
-         eric_eur_mwh::float   as eric,
-         ren_eur_mwh::float    as ren,
-         losses_percent::float as losses_pct,
-         network_eur_mwh::float as rede
-       from network_params
-      where install_type = $1
-      limit 1`,
+      `select eric_eur_mwh::float as eric,
+              ren_eur_mwh::float  as ren,
+              losses_percent::float as losses_pct,
+              network_eur_mwh::float as rede
+         from network_params
+        where install_type = $1
+        limit 1`,
       [body.install_type]
     );
     const net = netRows[0] || { eric: 0, ren: 0, losses_pct: 0, rede: 0 };
 
-    // 5) Referência de mercado (€/MWh)
+    // 5) Referência (€/MWh) = (OMIP + ERIC + REN) * (1 + perdas%)
     const referenceMWh = Number.isFinite(omipAvgMWh)
       ? (omipAvgMWh + net.eric + net.ren) * (1 + (net.losses_pct || 0) / 100)
       : NaN;
 
-    // 6) Preço do cliente "energia" (se inclui redes, subtrai o preço de rede)
+    // 6) Cliente “energia” (se inclui redes, subtrai preço de rede)
     const clientEnergyAvgMWh =
       Number.isFinite(clientAvgMWh)
         ? clientAvgMWh - (body.include_networks ? (net.rede || 0) : 0)
