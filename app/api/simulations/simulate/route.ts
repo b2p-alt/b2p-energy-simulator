@@ -2,6 +2,9 @@
 import { NextResponse } from "next/server";
 import { Pool } from "pg";
 
+export const runtime = "nodejs";         // garantir Node runtime (não Edge)
+export const dynamic = "force-dynamic";  // evitar tentativa de geração estática
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
